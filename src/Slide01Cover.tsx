@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Slide } from 'spectacle';
+import React, { useState, useContext } from 'react';
+import { Slide, DeckContext } from 'spectacle';
 import { motion } from 'framer-motion';
 import {
   SlideUp,
@@ -17,11 +17,23 @@ const drawTransition = (delay = 0, duration = 2.5) => ({
 
 export const Slide01CoverContent: React.FC = () => {
   const [speakerImgError, setSpeakerImgError] = useState(false);
+  const deckContext = useContext(DeckContext);
+
+  const handleSlideTap = () => {
+    if (deckContext?.stepForward) {
+      deckContext.stepForward();
+    } else if (deckContext?.advanceSlide) {
+      deckContext.advanceSlide();
+    }
+  };
 
   return (
     <SlideStage slideKey="slide-01-cover" className="bg-[#f4f2eb]">
-      {/* Canvas 16:9 fixo (1920x1080 lógico escalonado pelo Spectacle) */}
-      <div className="relative w-[1920px] h-[1080px] bg-[#f4f2eb] overflow-hidden select-none">
+      {/* Canvas 16:9 fixo (1920x1080 lógico escalonado de 320px até 4K/8K) */}
+      <div
+        onClick={handleSlideTap}
+        className="relative w-[1920px] h-[1080px] bg-[#f4f2eb] overflow-hidden select-none cursor-pointer"
+      >
         {/* =====================================================================
             1. TEXTOS CENTRALIZADOS NO TOPO (<SlideUp> com Stagger + CanvaFlowLayer)
            ===================================================================== */}
