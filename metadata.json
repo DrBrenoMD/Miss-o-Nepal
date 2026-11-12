@@ -1,0 +1,6 @@
+{
+  "name": "Missão Nepal — Apresentação Interativa",
+  "description": "Apresentação web interativa e imersiva em proporção 16:9 com estética Missão Nepal e Liquid Glass, construída com React, Spectacle e Framer Motion.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
