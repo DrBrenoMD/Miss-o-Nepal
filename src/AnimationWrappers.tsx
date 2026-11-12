@@ -6,9 +6,9 @@ export type SlideDirection = 'left' | 'right' | 'up' | 'down';
 
 /**
  * 1. <LiquidGlassContainer>
- * Card com estética Liquid Glass (Glassmorphism + bordas orgânicas assimétricas em pulsação contínua).
- * Alterna assimetricamente o border-radius (ex: 60% 40% 30% 70% / 60% 30% 70% 40% <-> 30% 60% 70% 40% / 50% 60% 30% 60%)
- * para simular um fluido vivo.
+ * Card com estética Liquid Glass (Vidro Fosco Translúcido + bordas orgânicas assimétricas em pulsação contínua).
+ * Mantém transparência real (bg-white/15 a bg-white/25) com backdrop-blur para que o mapa e os elementos
+ * ao fundo fiquem visivelmente desfocados através do vidro fosco, sem borrar os textos internos.
  */
 export interface LiquidGlassContainerProps extends HTMLMotionProps<'div'> {
   children?: ReactNode;
@@ -25,41 +25,33 @@ export const LiquidGlassContainer: React.FC<LiquidGlassContainerProps> = ({
   intensity = 'medium',
   tint = 'light',
   disablePulse = false,
-  duration = 7,
+  duration = 6,
   style,
   ...rest
 }) => {
-  const radiusKeyframes = {
-    subtle: [
-      '28px 42px 34px 26px / 26px 38px 30px 42px',
-      '40px 26px 30px 42px / 36px 28px 42px 28px',
-      '26px 38px 42px 30px / 42px 32px 26px 36px',
-      '28px 42px 34px 26px / 26px 38px 30px 42px',
-    ],
-    medium: [
-      '38px 58px 46px 32px / 34px 52px 38px 58px',
-      '56px 34px 40px 58px / 50px 34px 56px 36px',
-      '34px 52px 58px 38px / 56px 42px 32px 50px',
-      '38px 58px 46px 32px / 34px 52px 38px 58px',
-    ],
-    strong: [
-      '44px 72px 56px 36px / 38px 64px 44px 70px',
-      '68px 38px 48px 70px / 62px 38px 68px 40px',
-      '38px 62px 70px 44px / 68px 50px 36px 60px',
-      '44px 72px 56px 36px / 38px 64px 44px 70px',
-    ],
-    organic: [
-      '60% 40% 30% 70% / 60% 30% 70% 40%',
-      '30% 60% 70% 40% / 50% 60% 30% 60%',
-      '55% 45% 35% 65% / 40% 65% 35% 60%',
-      '60% 40% 30% 70% / 60% 30% 70% 40%',
-    ],
+  const staticRadius = {
+    subtle: '26px 38px 30px 24px / 24px 34px 28px 38px',
+    medium: '34px 52px 42px 30px / 32px 46px 36px 52px',
+    strong: '40px 64px 50px 34px / 36px 58px 40px 62px',
+    organic: '48px 34px 52px 36px / 36px 50px 34px 48px',
   };
 
-  const tintClasses = {
-    light: 'bg-white/25 border-white/75 text-[#0f0f0f]',
-    navy: 'bg-[#003893]/12 border-white/70 text-[#0f0f0f]',
-    crimson: 'bg-[#dc143c]/12 border-white/70 text-[#0f0f0f]',
+  const tintStyles = {
+    light: {
+      background:
+        'linear-gradient(135deg, rgba(255, 255, 255, 0.36) 0%, rgba(255, 255, 255, 0.14) 55%, rgba(244, 242, 235, 0.22) 100%)',
+      borderColor: 'rgba(255, 255, 255, 0.72)',
+    },
+    navy: {
+      background:
+        'linear-gradient(135deg, rgba(255, 255, 255, 0.32) 0%, rgba(0, 56, 147, 0.08) 60%, rgba(255, 255, 255, 0.18) 100%)',
+      borderColor: 'rgba(255, 255, 255, 0.65)',
+    },
+    crimson: {
+      background:
+        'linear-gradient(135deg, rgba(255, 255, 255, 0.32) 0%, rgba(220, 20, 60, 0.08) 60%, rgba(255, 255, 255, 0.18) 100%)',
+      borderColor: 'rgba(255, 255, 255, 0.65)',
+    },
   };
 
   return (
@@ -68,7 +60,7 @@ export const LiquidGlassContainer: React.FC<LiquidGlassContainerProps> = ({
         disablePulse
           ? undefined
           : {
-              borderRadius: radiusKeyframes[intensity],
+              y: [0, -4, 0],
             }
       }
       transition={
@@ -82,35 +74,22 @@ export const LiquidGlassContainer: React.FC<LiquidGlassContainerProps> = ({
             }
       }
       style={{
-        borderRadius: radiusKeyframes[intensity][0],
-        backgroundImage:
-          'linear-gradient(135deg, rgba(255, 255, 255, 0.72) 0%, rgba(255, 255, 255, 0.22) 48%, rgba(0, 56, 147, 0.08) 85%, rgba(220, 20, 60, 0.10) 100%)',
+        borderRadius: staticRadius[intensity],
+        background: tintStyles[tint].background,
+        borderColor: tintStyles[tint].borderColor,
+        WebkitBackdropFilter: 'blur(16px) saturate(160%)',
+        backdropFilter: 'blur(16px) saturate(160%)',
         boxShadow:
-          '0 28px 60px -12px rgba(8, 37, 76, 0.22), 0 8px 24px -4px rgba(0, 56, 147, 0.10), inset 0 2px 4px 0 rgba(255, 255, 255, 0.95), inset 0 -3px 10px 0 rgba(0, 56, 147, 0.12), inset 2px 0 6px 0 rgba(255, 255, 255, 0.65)',
+          '0 20px 45px -12px rgba(8, 37, 76, 0.14), inset 0 1.5px 2px 0 rgba(255, 255, 255, 0.92), inset 0 -1.5px 4px 0 rgba(0, 56, 147, 0.08)',
         ...style,
       }}
-      className={`relative overflow-hidden backdrop-blur-2xl border-2 shadow-2xl ${tintClasses[tint]} ${className}`}
+      className={`relative overflow-hidden border-[1.5px] text-[#0f0f0f] ${className}`}
       {...rest}
     >
-      {/* Reflexo especular curvo (Liquid Glass Specular Sheen) no topo do card */}
+      {/* Brilho especular diagonal de vidro fosco (sem obstruir a transparência) */}
       <div
         aria-hidden="true"
-        className="pointer-events-none absolute -top-1/2 -left-1/4 w-[150%] h-[85%] rounded-full bg-gradient-to-b from-white/65 via-white/15 to-transparent rotate-[-6deg]"
-      />
-      {/* Brilho cáustico líquido sutil nas bordas internas */}
-      <motion.div
-        aria-hidden="true"
-        animate={{
-          x: ['-10%', '12%', '-10%'],
-          y: ['-8%', '10%', '-8%'],
-        }}
-        transition={{
-          duration: duration * 1.1,
-          repeat: Infinity,
-          repeatType: 'mirror',
-          ease: 'easeInOut',
-        }}
-        className="pointer-events-none absolute -bottom-10 -right-10 w-44 h-44 rounded-full bg-gradient-to-tr from-[#003893]/18 via-[#dc143c]/12 to-white/30 blur-2xl"
+        className="pointer-events-none absolute inset-x-0 top-0 h-[45%] bg-gradient-to-b from-white/35 to-transparent"
       />
       <div className="relative z-10">{children}</div>
     </motion.div>
@@ -201,12 +180,12 @@ export const SlideUp: React.FC<SlideUpProps> = ({
 /**
  * 2c. <CanvaFlowLayer>
  * Camada com transição estilo "Fluxo" do Canva: cada elemento desliza em
- * velocidades e curvas ligeiramente diferentes (parallax multi-camada) enquanto
- * o background faz um fade suave.
+ * velocidades ligeiramente diferentes sem alterar `scale`, mantendo nitidez 100% nos textos e imagens.
  */
 export interface CanvaFlowLayerProps extends HTMLMotionProps<'div'> {
-  children: ReactNode;
+  children?: ReactNode;
   speed?: 'slow' | 'medium' | 'fast';
+  depth?: number;
   direction?: 'horizontal' | 'vertical';
   delay?: number;
   className?: string;
@@ -215,17 +194,18 @@ export interface CanvaFlowLayerProps extends HTMLMotionProps<'div'> {
 export const CanvaFlowLayer: React.FC<CanvaFlowLayerProps> = ({
   children,
   speed = 'medium',
+  depth,
   direction = 'horizontal',
   delay = 0,
   className = '',
   ...rest
 }) => {
   const distanceMap = {
-    slow: 90,
-    medium: 180,
-    fast: 300,
+    slow: 80,
+    medium: 160,
+    fast: 260,
   };
-  const d = distanceMap[speed];
+  const d = typeof depth === 'number' ? Math.round(140 * depth) : distanceMap[speed];
 
   const initialOffset =
     direction === 'horizontal' ? { x: d, y: 0 } : { x: 0, y: d * 0.7 };
@@ -234,11 +214,11 @@ export const CanvaFlowLayer: React.FC<CanvaFlowLayerProps> = ({
 
   return (
     <motion.div
-      initial={{ opacity: 0, ...initialOffset, scale: 0.97 }}
-      animate={{ opacity: 1, x: 0, y: 0, scale: 1 }}
-      exit={{ opacity: 0, ...exitOffset, scale: 0.97 }}
+      initial={{ opacity: 0, ...initialOffset }}
+      animate={{ opacity: 1, x: 0, y: 0 }}
+      exit={{ opacity: 0, ...exitOffset }}
       transition={{
-        duration: 0.85,
+        duration: 0.8,
         delay,
         ease: [0.22, 1, 0.36, 1],
       }}
@@ -361,10 +341,10 @@ export const SlideStage: React.FC<SlideStageProps> = ({
         {isSlideActive && (
           <motion.div
             key={slideKey}
-            initial={{ opacity: 0, x: 60 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: -60 }}
-            transition={{ duration: 0.75, ease: [0.22, 1, 0.36, 1] }}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.65, ease: [0.22, 1, 0.36, 1] }}
             className="relative w-full h-full"
           >
             {children}
