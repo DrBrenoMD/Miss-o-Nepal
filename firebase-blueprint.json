@@ -1,0 +1,282 @@
+{
+  "entities": {
+    "ConnectionTest": {
+      "title": "ConnectionTest",
+      "description": "Read-only connectivity probe document used on boot to verify Firestore reachability.",
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean",
+          "description": "Connectivity check flag."
+        }
+      }
+    },
+    "CastDevice": {
+      "title": "CastDevice",
+      "description": "Live presence and remote-summon beacon for an open presentation screen or device.",
+      "type": "object",
+      "properties": {
+        "clientId": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Unique ephemeral session client identifier."
+        },
+        "appScope": {
+          "type": "string",
+          "enum": ["missao-nepal-v1"],
+          "maxLength": 32,
+          "description": "Application namespace partition key for scoped discovery queries."
+        },
+        "networkHash": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 32,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Hashed public router identifier used to highlight devices on the same Wi-Fi."
+        },
+        "deviceLabel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "description": "Human-readable OS and browser display label."
+        },
+        "deviceType": {
+          "type": "string",
+          "enum": ["desktop", "mobile", "tv"],
+          "maxLength": 16,
+          "description": "Form factor classification of the screen."
+        },
+        "screenResolution": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 24,
+          "description": "Detected viewport/display resolution string."
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["standalone", "presenter", "screen"],
+          "maxLength": 16,
+          "description": "Current presentation role of this device."
+        },
+        "roomId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Current room code associated with this device."
+        },
+        "slideIndex": {
+          "type": "integer",
+          "description": "Zero-based index of the currently displayed slide."
+        },
+        "summonRoomId": {
+          "type": "string",
+          "maxLength": 16,
+          "description": "Target room code when remotely summoned by a presenter."
+        },
+        "summonSlideIndex": {
+          "type": "integer",
+          "description": "Initial slide index requested by a remote summon."
+        },
+        "summonSubStep": {
+          "type": "integer",
+          "description": "Initial sub-step index requested by a remote summon."
+        },
+        "summonNonce": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Unique command token triggering immediate transition to receiver screen mode."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the last presence heartbeat or summon action."
+        }
+      },
+      "required": [
+        "clientId",
+        "appScope",
+        "networkHash",
+        "deviceLabel",
+        "deviceType",
+        "screenResolution",
+        "mode",
+        "roomId",
+        "slideIndex",
+        "summonRoomId",
+        "summonSlideIndex",
+        "summonSubStep",
+        "summonNonce",
+        "updatedAt"
+      ]
+    },
+    "CastRoom": {
+      "title": "CastRoom",
+      "description": "Real-time synchronized presentation room state shared between presenter controls and receiver screens.",
+      "type": "object",
+      "properties": {
+        "roomId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Room code identifier."
+        },
+        "appScope": {
+          "type": "string",
+          "enum": ["missao-nepal-v1"],
+          "maxLength": 32,
+          "description": "Application namespace identifier."
+        },
+        "activePresenterId": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Client ID of the active presenter controlling this room."
+        },
+        "slideIndex": {
+          "type": "integer",
+          "description": "Active zero-based slide index (0 to 7)."
+        },
+        "subStep": {
+          "type": "integer",
+          "description": "Active zero-based internal step index."
+        },
+        "blackout": {
+          "type": "boolean",
+          "description": "Whether receiver screens display the dark pause curtain."
+        },
+        "pointerActive": {
+          "type": "boolean",
+          "description": "Whether the live laser pointer is currently visible."
+        },
+        "pointerX": {
+          "type": "number",
+          "description": "Horizontal coordinate (0..1920) of the laser pointer."
+        },
+        "pointerY": {
+          "type": "number",
+          "description": "Vertical coordinate (0..1080) of the laser pointer."
+        },
+        "pointerColor": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 16,
+          "description": "Hex color of the laser pointer."
+        },
+        "spotlightActive": {
+          "type": "boolean",
+          "description": "Whether the focus spotlight mask is active."
+        },
+        "spotlightX": {
+          "type": "number",
+          "description": "Horizontal coordinate (0..1920) of the spotlight center."
+        },
+        "spotlightY": {
+          "type": "number",
+          "description": "Vertical coordinate (0..1080) of the spotlight center."
+        },
+        "economyMetric": {
+          "type": "string",
+          "enum": ["perCapita", "gdp", "hdi"],
+          "maxLength": 16,
+          "description": "Selected chart metric on Slide 03."
+        },
+        "casteTier": {
+          "type": "integer",
+          "description": "Highlighted caste tier on Slide 04 (0 = none, 1..4 = tier)."
+        },
+        "timelineLens": {
+          "type": "string",
+          "enum": ["auto", "panorama", "era"],
+          "maxLength": 16,
+          "description": "Chart zoom lens mode on Slide 08."
+        },
+        "timerRunning": {
+          "type": "boolean",
+          "description": "Whether the presentation stopwatch is running."
+        },
+        "timerElapsedMs": {
+          "type": "integer",
+          "description": "Accumulated elapsed milliseconds before the current run."
+        },
+        "timerStartedAtMs": {
+          "type": "integer",
+          "description": "Epoch milliseconds when the current timer run started."
+        },
+        "strokesSlideIndex": {
+          "type": "integer",
+          "description": "Slide index to which strokesCurrentSlide belongs."
+        },
+        "strokesCurrentSlide": {
+          "type": "array",
+          "description": "Bounded list of vector annotation strokes for the current slide."
+        },
+        "noteKey": {
+          "type": "string",
+          "maxLength": 16,
+          "description": "Step key (slideIndex:subStep) of the most recently edited speaker note."
+        },
+        "noteText": {
+          "type": "string",
+          "maxLength": 4000,
+          "description": "Updated speaker note text for noteKey."
+        },
+        "updatedBy": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Client ID that issued the update."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the room state mutation."
+        }
+      },
+      "required": [
+        "roomId",
+        "appScope",
+        "activePresenterId",
+        "slideIndex",
+        "subStep",
+        "blackout",
+        "pointerActive",
+        "pointerX",
+        "pointerY",
+        "pointerColor",
+        "spotlightActive",
+        "spotlightX",
+        "spotlightY",
+        "economyMetric",
+        "casteTier",
+        "timelineLens",
+        "timerRunning",
+        "timerElapsedMs",
+        "timerStartedAtMs",
+        "strokesSlideIndex",
+        "strokesCurrentSlide",
+        "noteKey",
+        "noteText",
+        "updatedBy",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/test/{testId}": {
+      "schema": "ConnectionTest",
+      "description": "Read-only connectivity probe path."
+    },
+    "/castDevices/{deviceId}": {
+      "schema": "CastDevice",
+      "description": "Active presentation screens available for remote cast discovery."
+    },
+    "/castRooms/{roomId}": {
+      "schema": "CastRoom",
+      "description": "Live synchronized presentation rooms."
+    }
+  }
+}

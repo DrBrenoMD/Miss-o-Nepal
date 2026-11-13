@@ -348,25 +348,31 @@ export const LiveAnnotationOverlay: React.FC<LiveAnnotationOverlayProps> = React
         {/* 2. Camada de Desenhos Vetoriais do Slide */}
         <g>{strokes.map((stroke) => renderStrokeElement(stroke))}</g>
 
-        {/* 3. Laser Pointer em Tempo Real */}
+        {/* 3. Laser Pointer em Tempo Real (com interpolação suave a 60fps nos telões) */}
         {pointer?.active && (
-          <g filter={`url(#laser-glow-${variant})`}>
+          <g
+            filter={`url(#laser-glow-${variant})`}
+            style={{
+              transform: `translate(${pointer.x}px, ${pointer.y}px)`,
+              transition: variant === 'receiver' ? 'transform 80ms linear' : 'none',
+            }}
+          >
             <circle
-              cx={pointer.x}
-              cy={pointer.y}
+              cx={0}
+              cy={0}
               r="26"
               fill={pointer.color || '#dc143c'}
               fillOpacity="0.28"
             />
             <circle
-              cx={pointer.x}
-              cy={pointer.y}
+              cx={0}
+              cy={0}
               r="13"
               fill={pointer.color || '#dc143c'}
               stroke="#ffffff"
               strokeWidth="3.5"
             />
-            <circle cx={pointer.x} cy={pointer.y} r="4.5" fill="#ffffff" />
+            <circle cx={0} cy={0} r="4.5" fill="#ffffff" />
           </g>
         )}
       </svg>

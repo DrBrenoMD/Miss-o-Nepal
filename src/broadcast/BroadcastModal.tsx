@@ -29,6 +29,7 @@ export const BroadcastModal: React.FC<BroadcastModalProps> = React.memo(({ getDe
     closeBroadcastModal,
     startPresenting,
     castToDevices,
+    startW3cNativeCast,
     joinAsScreen,
     joinAsPresenter,
     leaveBroadcast,
@@ -41,6 +42,10 @@ export const BroadcastModal: React.FC<BroadcastModalProps> = React.memo(({ getDe
     isScanningNetwork,
     networkDevices,
     presence,
+    w3cCastSupported,
+    w3cCastAvailable,
+    w3cCastActive,
+    w3cStatusMessage,
   } = useBroadcastDiscovery();
 
   const [activeTab, setActiveTab] = useState<'host' | 'join'>('host');
@@ -50,7 +55,6 @@ export const BroadcastModal: React.FC<BroadcastModalProps> = React.memo(({ getDe
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
   const [copied, setCopied] = useState<boolean>(false);
 
-  // Lista inteligente de URLs base (compatível com Vercel, domínio próprio, LAN e Google AI Studio ais-dev/ais-pre)
   const availableBaseUrls = useMemo(() => {
     const list: Array<{ label: string; url: string }> = [];
     const addUnique = (label: string, url: string | null | undefined) => {
@@ -166,10 +170,10 @@ export const BroadcastModal: React.FC<BroadcastModalProps> = React.memo(({ getDe
             </div>
             <div className="min-w-0">
               <h2 className="font-display text-base sm:text-lg font-extrabold tracking-tight truncate">
-                Transmissão Multi-Telas P2P
+                Transmissão Multi-Telas em Tempo Real
               </h2>
               <p className="font-sans text-xs text-white/70 truncate">
-                Detecção automática por Wi-Fi ou pareamento instantâneo via QR Code / Sala
+                Sincronização instantânea em nuvem (Wi-Fi / 4G) + Cast Nativo HDMI/TV
               </p>
             </div>
           </div>
@@ -184,7 +188,7 @@ export const BroadcastModal: React.FC<BroadcastModalProps> = React.memo(({ getDe
           </button>
         </div>
 
-        {/* Seletor de Modo (Transmitir vs Conectar a uma Sala) */}
+        {/* Seletor de Abas */}
         <div className="px-5 sm:px-6 pt-3.5 flex items-center justify-between gap-3 flex-wrap border-b border-stone-200 pb-3 shrink-0">
           <div className="flex items-center gap-1 p-1 rounded-xl bg-stone-200/75">
             <button
@@ -196,7 +200,7 @@ export const BroadcastModal: React.FC<BroadcastModalProps> = React.memo(({ getDe
                   : 'text-stone-600 hover:text-[#080d1a]'
               }`}
             >
-              Telas na Rede &amp; QR ({roomId})
+              Telas Detectadas &amp; Cast ({roomId})
             </button>
             <button
               type="button"
@@ -214,16 +218,59 @@ export const BroadcastModal: React.FC<BroadcastModalProps> = React.memo(({ getDe
           <div className="flex items-center gap-2 text-xs font-sans text-stone-600">
             <Wifi className={`w-4 h-4 ${connected ? 'text-emerald-600' : 'text-amber-600'}`} />
             <span className="font-semibold">
-              {connected ? 'Canal P2P Pronto' : 'Iniciando P2P...'}
+              {connected ? 'Nuvem Sincronizada' : 'Conectando...'}
             </span>
           </div>
         </div>
 
         <div className="overflow-y-auto flex-1">
           {activeTab === 'host' ? (
-            <div className="p-5 sm:p-6 space-y-5">
+            <div className="p-5 sm:p-6 space-y-4">
               {/* ===============================================================
-                  RADAR DE DESCOBERTA AUTOMÁTICA DE TELAS NA MESMA REDE WI-FI
+                  1. SELETOR NATIVO W3C DO NAVEGADOR (CHROMECAST / GOOGLE TV / HDMI)
+                 =============================================================== */}
+              {w3cCastSupported && (
+                <div className="rounded-2xl bg-[#08254c] text-white p-3.5 sm:p-4 flex flex-col gap-2 shadow-sm">
+                  <div className="flex items-center justify-between gap-3 flex-wrap">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="w-9 h-9 rounded-xl bg-white/15 flex items-center justify-center shrink-0">
+                        <Tv className="w-4 h-4 text-white" />
+                      </div>
+                      <div className="min-w-0">
+                        <div className="font-display text-xs sm:text-sm font-extrabold truncate">
+                          Cast Nativo do Navegador (TV / Projetor HDMI)
+                        </div>
+                        <div className="font-sans text-[11px] text-white/75 truncate">
+                          {w3cCastActive
+                            ? 'Conectado via W3C Presentation API'
+                            : w3cCastAvailable
+                            ? 'Abre o seletor nativo do Chrome/Android para Chromecast ou 2ª tela HDMI'
+                            : 'Enviar direto para Chromecast, Android TV ou monitor secundário'}
+                        </div>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => startW3cNativeCast(resolveCurrentPos())}
+                      className="px-3.5 py-2 rounded-xl bg-white hover:bg-stone-100 text-[#08254c] font-sans text-xs font-extrabold flex items-center gap-1.5 shrink-0 transition-colors cursor-pointer"
+                    >
+                      <Cast className="w-3.5 h-3.5 text-[#dc143c]" />
+                      <span>{w3cCastActive ? 'Reconectar Cast' : 'Escolher Tela (Cast)'}</span>
+                    </button>
+                  </div>
+
+                  {w3cStatusMessage && (
+                    <div className="rounded-xl bg-white/10 px-3 py-2 font-sans text-[11px] text-amber-200 leading-snug">
+                      {w3cStatusMessage}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* ===============================================================
+                  2. RADAR DE DESCOBERTA AUTOMÁTICA EM TEMPO REAL (FIRESTORE CLOUD)
+                     Encontra iPhones, Androids, PCs, Macs e Smart TVs instantaneamente!
                  =============================================================== */}
               <div className="rounded-2xl bg-white border border-stone-200 p-4 shadow-sm">
                 <div className="flex items-center justify-between gap-2 mb-3">
@@ -233,7 +280,7 @@ export const BroadcastModal: React.FC<BroadcastModalProps> = React.memo(({ getDe
                       <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500" />
                     </span>
                     <h3 className="font-display text-xs sm:text-sm font-extrabold uppercase tracking-wider text-[#080d1a] truncate">
-                      Telas Detectadas na Rede ({castableDevices.length})
+                      Telas Abertas Detectadas ({castableDevices.length})
                     </h3>
                   </div>
 
@@ -251,7 +298,7 @@ export const BroadcastModal: React.FC<BroadcastModalProps> = React.memo(({ getDe
                       type="button"
                       onClick={() => scanNetworkDevices()}
                       className="px-2.5 py-1.5 rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-700 font-sans text-[11px] font-bold flex items-center gap-1 transition-colors cursor-pointer"
-                      title="Buscar telas abertas na mesma rede Wi-Fi"
+                      title="Atualizar lista de telas abertas"
                     >
                       <RefreshCw
                         className={`w-3.5 h-3.5 ${isScanningNetwork ? 'animate-spin' : ''}`}
@@ -303,9 +350,14 @@ export const BroadcastModal: React.FC<BroadcastModalProps> = React.memo(({ getDe
                                   <span className="text-emerald-700 font-bold">
                                     Recebendo ao vivo (Sala {dev.roomId})
                                   </span>
-                                ) : (
+                                ) : dev.sameNetwork ? (
                                   <span className="text-[#003893] font-semibold">
-                                    Mesma Rede Wi-Fi · Slide {String(dev.slideIndex + 1).padStart(2, '0')}
+                                    Mesma Rede Wi-Fi · Slide{' '}
+                                    {String(dev.slideIndex + 1).padStart(2, '0')}
+                                  </span>
+                                ) : (
+                                  <span className="text-stone-600 font-semibold">
+                                    Online · Slide {String(dev.slideIndex + 1).padStart(2, '0')}
                                   </span>
                                 )}
                               </div>
@@ -332,22 +384,16 @@ export const BroadcastModal: React.FC<BroadcastModalProps> = React.memo(({ getDe
                   <div className="rounded-xl bg-stone-50 border border-dashed border-stone-300 px-4 py-3 flex items-center gap-3 text-left">
                     <Radio className="w-5 h-5 text-stone-400 shrink-0" />
                     <p className="font-sans text-xs text-stone-600 leading-relaxed">
-                      {isScanningNetwork ? (
-                        <span>Procurando telas abertas na mesma rede Wi-Fi...</span>
-                      ) : (
-                        <>
-                          Nenhuma outra tela detectada ainda. Basta abrir a apresentação no{' '}
-                          <strong>computador, TV ou celular</strong> conectado ao mesmo Wi-Fi para
-                          que ela apareça aqui — ou use o QR Code / Código abaixo.
-                        </>
-                      )}
+                      Abra esta apresentação no <strong>computador, Smart TV ou projetor</strong>{' '}
+                      (mesmo em redes diferentes, 4G ou Wi-Fi) para que a tela apareça aqui
+                      instantaneamente — ou escaneie o QR Code abaixo.
                     </p>
                   </div>
                 )}
               </div>
 
               {/* ===============================================================
-                  QR CODE + CÓDIGO DE SALA DE 4 DÍGITOS + LINK COPIÁVEL
+                  3. QR CODE + CÓDIGO DE SALA DE 4 DÍGITOS + LINK COPIÁVEL
                  =============================================================== */}
               <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-stretch">
                 {/* Coluna QR Code */}
@@ -380,7 +426,7 @@ export const BroadcastModal: React.FC<BroadcastModalProps> = React.memo(({ getDe
                   {qrDataUrl ? (
                     <img
                       src={qrDataUrl}
-                      alt="QR Code de conexão rápida na rede"
+                      alt="QR Code de conexão rápida"
                       className="w-40 h-40 rounded-xl border border-stone-100"
                     />
                   ) : (
@@ -430,7 +476,6 @@ export const BroadcastModal: React.FC<BroadcastModalProps> = React.memo(({ getDe
                     </div>
                   </div>
 
-                  {/* Seletor de URL caso existam múltiplas origens */}
                   {availableBaseUrls.length > 1 && (
                     <div>
                       <label className="block font-sans text-xs font-bold text-stone-600 mb-1">
@@ -450,7 +495,6 @@ export const BroadcastModal: React.FC<BroadcastModalProps> = React.memo(({ getDe
                     </div>
                   )}
 
-                  {/* Link Copiável */}
                   <div>
                     <label className="block font-sans text-xs font-bold text-stone-600 mb-1">
                       {qrTargetRole === 'screen'

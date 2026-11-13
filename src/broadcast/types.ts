@@ -60,7 +60,6 @@ export interface ClientPresence {
 
 export interface NetworkDeviceInfo {
   clientId: string;
-  beaconPeerId?: string;
   deviceLabel: string;
   deviceType: 'desktop' | 'mobile' | 'tv';
   screenResolution: string;

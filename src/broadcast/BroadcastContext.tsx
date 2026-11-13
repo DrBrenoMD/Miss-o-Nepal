@@ -7,17 +7,31 @@ import React, {
   useCallback,
   useMemo,
 } from 'react';
-import Peer, { DataConnection } from 'peerjs';
+import {
+  collection,
+  deleteDoc,
+  doc,
+  getDocs,
+  onSnapshot,
+  query,
+  serverTimestamp,
+  setDoc,
+  Timestamp,
+  updateDoc,
+  where,
+} from 'firebase/firestore';
+import { db, handleFirestoreError, OperationType } from '../firebase';
 import {
   BroadcastMode,
   BroadcastNavState,
   BroadcastOverlayState,
   ClientPresence,
+  DrawingPoint,
   DrawingStroke,
+  DrawingTool,
   NetworkDeviceInfo,
   PointerState,
   RemoteCastCommand,
-  RoomSyncState,
   SlideCustomState,
   SpotlightState,
   TimerState,
@@ -38,35 +52,45 @@ import {
 export { StageInstanceProvider, useStageInstance };
 export type { StageInstanceConfig };
 
+const APP_SCOPE = 'missao-nepal-v1';
 const NOTES_STORAGE_KEY = 'missao_nepal_speaker_notes_v1';
 const CLIENT_ID_KEY = 'missao_nepal_client_id_v1';
 const NET_HASH_KEY = 'missao_nepal_net_hash_v3';
+const BC_CHANNEL_NAME = 'missao-nepal-hybrid-bc-v1';
+const DEVICE_TTL_MS = 110_000;
 
-const LAN_SLOT_COUNT = 6;
-const PEER_PREFIX = 'mn-nepal-v3';
+function sanitizeSafeId(raw: string, minLen = 4, maxLen = 64): string {
+  const cleaned = raw.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, maxLen);
+  if (cleaned.length >= minLen) return cleaned;
+  return `dev-${Math.random().toString(36).slice(2, 10)}`;
+}
 
-const PEER_CONFIG = {
-  debug: 0,
-  config: {
-    iceServers: [
-      { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:stun1.l.google.com:19302' },
-      { urls: 'stun:stun2.l.google.com:19302' },
-      { urls: 'stun:global.stun.twilio.com:3478' },
-    ],
-  },
-};
+function sanitizeRoomCode(raw: string): string {
+  const cleaned = raw
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9_-]/g, '')
+    .slice(0, 16);
+  return cleaned || '1000';
+}
+
+function clampNum(val: number, min: number, max: number): number {
+  if (!Number.isFinite(val)) return min;
+  return Math.max(min, Math.min(max, Math.round(val * 10) / 10));
+}
 
 function getOrCreateClientId(): string {
-  if (typeof window === 'undefined') return 'server';
+  if (typeof window === 'undefined') return 'dev-server';
   try {
     const existing = window.sessionStorage.getItem(CLIENT_ID_KEY);
-    if (existing) return existing;
-    const created = `dev-${Math.random().toString(36).slice(2, 8)}-${Date.now().toString(36)}`;
+    if (existing && /^[a-zA-Z0-9_-]{4,64}$/.test(existing)) return existing;
+    const created = sanitizeSafeId(
+      `dev-${Math.random().toString(36).slice(2, 8)}-${Date.now().toString(36)}`
+    );
     window.sessionStorage.setItem(CLIENT_ID_KEY, created);
     return created;
   } catch {
-    return `dev-${Math.random().toString(36).slice(2, 9)}`;
+    return sanitizeSafeId(`dev-${Math.random().toString(36).slice(2, 10)}`);
   }
 }
 
@@ -82,7 +106,6 @@ function hashStringHex(input: string): string {
 function normalizePublicIpForLanMatch(rawIp: string): string {
   const trimmed = rawIp.trim().toLowerCase();
   if (!trimmed) return 'localdefault';
-  // Se for IPv6, agrupa pelo prefixo /64 do roteador Wi-Fi (4 primeiros blocos)
   if (trimmed.includes(':')) {
     return trimmed.split(':').slice(0, 4).join(':');
   }
@@ -99,57 +122,36 @@ async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Respons
   }
 }
 
-/**
- * Descobre o IP público do roteador Wi-Fi atual (IPv4 prioritário) para agrupar automaticamente
- * celulares, computadores e Smart TVs conectados na mesma rede Wi-Fi — funcionando tanto na Vercel
- * quanto entre domínios diferentes do Google AI Studio (`ais-dev` ↔ `ais-pre`) sem backend!
- */
 async function resolvePublicNetworkHash(): Promise<string> {
   if (typeof window === 'undefined') return 'localdefault';
   try {
     const cached = window.sessionStorage.getItem(NET_HASH_KEY);
-    if (cached) return cached;
+    if (cached && /^[a-zA-Z0-9_-]{4,32}$/.test(cached)) return cached;
   } catch {
     // Ignora
   }
 
   let resolvedIp = '';
-
-  // 1. ipify IPv4-only (garante mesmo IP NAT em redes dual-stack entre PC e Celular)
   try {
-    const res = await fetchWithTimeout('https://api.ipify.org?format=json', 2400);
+    const res = await fetchWithTimeout('https://api.ipify.org?format=json', 2200);
     if (res.ok) {
       const data = await res.json();
       if (data?.ip) resolvedIp = String(data.ip);
     }
   } catch {
-    // Tenta fallback
+    // Fallback
   }
 
-  // 2. api4.ipify.org fallback
   if (!resolvedIp) {
     try {
-      const res = await fetchWithTimeout('https://api4.ipify.org?format=json', 2400);
-      if (res.ok) {
-        const data = await res.json();
-        if (data?.ip) resolvedIp = String(data.ip);
-      }
-    } catch {
-      // Tenta fallback
-    }
-  }
-
-  // 3. Cloudflare trace fallback
-  if (!resolvedIp) {
-    try {
-      const res = await fetchWithTimeout('https://www.cloudflare.com/cdn-cgi/trace', 2400);
+      const res = await fetchWithTimeout('https://www.cloudflare.com/cdn-cgi/trace', 2200);
       if (res.ok) {
         const text = await res.text();
         const match = text.match(/^ip=(.+)$/m);
         if (match?.[1]) resolvedIp = match[1].trim();
       }
     } catch {
-      // Tenta fallback padrão
+      // Fallback
     }
   }
 
@@ -162,7 +164,6 @@ async function resolvePublicNetworkHash(): Promise<string> {
   } catch {
     // Ignora
   }
-
   return hash;
 }
 
@@ -172,12 +173,12 @@ function detectDeviceProfile(): {
   resolution: string;
 } {
   if (typeof navigator === 'undefined' || typeof window === 'undefined') {
-    return { label: 'Dispositivo', type: 'desktop', resolution: '1920×1080' };
+    return { label: 'Dispositivo', type: 'desktop', resolution: '1920x1080' };
   }
   const ua = navigator.userAgent || '';
   const sw = window.screen?.width || window.innerWidth || 1920;
   const sh = window.screen?.height || window.innerHeight || 1080;
-  const resolution = `${sw}×${sh}`;
+  const resolution = `${sw}×${sh}`.slice(0, 24);
 
   const browser = /Edg\//i.test(ua)
     ? 'Edge'
@@ -189,10 +190,11 @@ function detectDeviceProfile(): {
     ? 'Firefox'
     : '';
 
-  const withBrowser = (osName: string) => (browser ? `${osName} · ${browser}` : osName);
+  const withBrowser = (osName: string) =>
+    (browser ? `${osName} · ${browser}` : osName).slice(0, 80);
 
-  if (/SmartTV|Tizen|Web0S|BRAVIA|AFT|TV/i.test(ua)) {
-    return { label: withBrowser('Smart TV'), type: 'tv', resolution };
+  if (/SmartTV|Tizen|Web0S|BRAVIA|AFT|CrKey|TV/i.test(ua)) {
+    return { label: withBrowser('Smart TV / Cast'), type: 'tv', resolution };
   }
   if (/iPad/i.test(ua)) {
     return { label: withBrowser('iPad'), type: 'mobile', resolution };
@@ -216,12 +218,7 @@ function detectDeviceProfile(): {
 }
 
 function generateRoomCode(): string {
-  const num = Math.floor(1000 + Math.random() * 9000);
-  return String(num);
-}
-
-function sanitizePeerRoomToken(roomId: string): string {
-  return roomId.replace(/[^A-Z0-9_-]/gi, '').toUpperCase() || '0000';
+  return String(Math.floor(1000 + Math.random() * 9000));
 }
 
 function loadSavedNotes(): Record<string, string> {
@@ -236,9 +233,83 @@ function loadSavedNotes(): Record<string, string> {
   }
 }
 
+interface SerializedCloudStroke {
+  id: string;
+  tool: string;
+  color: string;
+  width: number;
+  pts: number[];
+}
+
+function serializeStrokesForFirestore(strokes: DrawingStroke[]): SerializedCloudStroke[] {
+  return strokes.slice(0, 80).map((st) => {
+    const rawPts = st.points || [];
+    // Limita a 280 pontos (560 números <= limite de 600 nas Security Rules)
+    const step = rawPts.length > 280 ? Math.ceil(rawPts.length / 280) : 1;
+    const flat: number[] = [];
+    for (let i = 0; i < rawPts.length && flat.length < 576; i += step) {
+      flat.push(clampNum(rawPts[i].x, 0, 1920), clampNum(rawPts[i].y, 0, 1080));
+    }
+    if (rawPts.length > 1 && step > 1) {
+      const last = rawPts[rawPts.length - 1];
+      flat.push(clampNum(last.x, 0, 1920), clampNum(last.y, 0, 1080));
+    }
+    return {
+      id: String(st.id || 'st').slice(0, 48),
+      tool: String(st.tool || 'pen').slice(0, 16),
+      color: String(st.color || '#dc143c').slice(0, 16),
+      width: clampNum(st.width || 6, 1, 40),
+      pts: flat,
+    };
+  });
+}
+
+function deserializeStrokesFromFirestore(rawList: unknown): DrawingStroke[] {
+  if (!Array.isArray(rawList)) return [];
+  const validTools: DrawingTool[] = ['pen', 'highlighter', 'arrow', 'rect', 'circle'];
+  const result: DrawingStroke[] = [];
+
+  for (const item of rawList) {
+    if (!item || typeof item !== 'object') continue;
+    const rec = item as Record<string, any>;
+    const ptsArr = Array.isArray(rec.pts) ? rec.pts : [];
+    const points: DrawingPoint[] = [];
+    for (let i = 0; i + 1 < ptsArr.length; i += 2) {
+      points.push({
+        x: Number(ptsArr[i]) || 0,
+        y: Number(ptsArr[i + 1]) || 0,
+      });
+    }
+    if (points.length === 0) continue;
+    const toolCandidate = String(rec.tool || 'pen') as DrawingTool;
+    result.push({
+      id: String(rec.id || `st-${result.length}`),
+      tool: validTools.includes(toolCandidate) ? toolCandidate : 'pen',
+      color: String(rec.color || '#dc143c'),
+      width: Number(rec.width) || 6,
+      points,
+    });
+  }
+
+  return result;
+}
+
+function isFirestorePermissionError(error: unknown): boolean {
+  const msg = error instanceof Error ? error.message : String(error);
+  return /Missing or insufficient permissions|permission-denied/i.test(msg);
+}
+
+function resolvePublicReceiverBaseUrl(): string {
+  if (typeof window === 'undefined') return 'http://localhost:3000';
+  const origin = window.location.origin.replace(/\/+$/, '');
+  if (origin.startsWith('https://ais-dev-')) {
+    return origin.replace(/^https:\/\/ais-dev-/, 'https://ais-pre-');
+  }
+  return origin;
+}
+
 // ============================================================================
 // 1. CONTEXTO DE NAVEGAÇÃO E AÇÕES ESTÁVEIS (CONSUMIDO PELO DECK E SLIDES)
-// Nunca atualiza em movimentos de laser pointer, desenhos, cronômetro ou busca Wi-Fi!
 // ============================================================================
 export interface BroadcastContextValue {
   myClientId: string;
@@ -256,6 +327,7 @@ export interface BroadcastContextValue {
     targetClientIds: string[] | 'ALL',
     initialPos?: { slideIndex: number; subStep: number }
   ) => Promise<void>;
+  startW3cNativeCast: (initialPos?: { slideIndex: number; subStep: number }) => Promise<void>;
   joinAsScreen: (targetRoomId: string) => void;
   joinAsPresenter: (targetRoomId: string) => void;
   leaveBroadcast: () => void;
@@ -277,12 +349,12 @@ export interface BroadcastContextValue {
 }
 
 // ============================================================================
-// 2. CONTEXTO DE CAMADA VETORIAL / OVERLAY AO VIVO (CONSUMIDO APENAS PELO SVG E CONSOLE)
+// 2. CONTEXTO DE CAMADA VETORIAL / OVERLAY AO VIVO (CONSUMIDO PELO SVG E CONSOLE)
 // ============================================================================
 export interface BroadcastOverlayContextValue extends BroadcastOverlayState {}
 
 // ============================================================================
-// 3. CONTEXTO DE DESCOBERTA NA REDE, PRESENÇA E NOTAS (MODAL E CONSOLE)
+// 3. CONTEXTO DE DESCOBERTA HÍBRIDA (FIRESTORE CLOUD + W3C NATIVE CAST)
 // ============================================================================
 export interface BroadcastDiscoveryContextValue {
   connected: boolean;
@@ -292,6 +364,10 @@ export interface BroadcastDiscoveryContextValue {
   presence: ClientPresence[];
   customNotes: Record<string, string>;
   getNoteForStep: (slideIndex: number, subStep: number) => string;
+  w3cCastSupported: boolean;
+  w3cCastAvailable: boolean;
+  w3cCastActive: boolean;
+  w3cStatusMessage: string | null;
 }
 
 const BroadcastContext = createContext<BroadcastContextValue | null>(null);
@@ -304,11 +380,12 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       return { room: generateRoomCode(), mode: 'standalone' as BroadcastMode };
     }
     const params = new URLSearchParams(window.location.search);
-    const rawRoom = (params.get('sala') || params.get('room') || '').trim().toUpperCase();
+    const rawRoom = sanitizeRoomCode(params.get('sala') || params.get('room') || '');
+    const hasExplicitRoom = Boolean((params.get('sala') || params.get('room') || '').trim());
     const rawMode = (params.get('modo') || params.get('role') || '').trim().toLowerCase();
 
     let initialMode: BroadcastMode = 'standalone';
-    if (rawRoom) {
+    if (hasExplicitRoom) {
       if (rawMode === 'apresentador' || rawMode === 'presenter') {
         initialMode = 'presenter';
       } else {
@@ -317,7 +394,7 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     }
 
     return {
-      room: rawRoom || generateRoomCode(),
+      room: hasExplicitRoom ? rawRoom : generateRoomCode(),
       mode: initialMode,
     };
   }, []);
@@ -325,7 +402,6 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const [mode, setMode] = useState<BroadcastMode>(initialUrlParams.mode);
   const [roomId, setRoomId] = useState<string>(initialUrlParams.room);
 
-  // Estado 1: Navegação & Controles Contextuais de Slide (ultra-leve)
   const [navState, setNavState] = useState<BroadcastNavState>(() => ({
     roomId: initialUrlParams.room,
     slideIndex: 0,
@@ -337,7 +413,6 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     },
   }));
 
-  // Estado 2: Laser Pointer, Desenho Vetorial, Lupa, Cortina e Cronômetro
   const [overlayState, setOverlayState] = useState<BroadcastOverlayState>(() => ({
     blackout: false,
     spotlight: null,
@@ -351,50 +426,45 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     serverTimeOffsetMs: 0,
   }));
 
-  // Estado 3: Descoberta P2P na Rede, Presença, Modal e Notas
   const [connected, setConnected] = useState<boolean>(false);
   const [isBroadcastModalOpen, setIsBroadcastModalOpen] = useState<boolean>(false);
   const [isScanningNetwork, setIsScanningNetwork] = useState<boolean>(false);
   const [networkDevices, setNetworkDevices] = useState<NetworkDeviceInfo[]>([]);
-  const [presence, setPresence] = useState<ClientPresence[]>([]);
   const [customNotes, setCustomNotes] = useState<Record<string, string>>(() => loadSavedNotes());
-  const [netHash, setNetHash] = useState<string>('');
-  const [p2pActivated, setP2pActivated] = useState<boolean>(() => initialUrlParams.mode !== 'standalone');
+  const [cloudReady, setCloudReady] = useState<boolean>(() => initialUrlParams.mode !== 'standalone');
 
-  // Refs espelhados para que 100% dos callbacks tenham identidade estável (zero re-renders em cascata)
+  // Estado W3C Presentation API nativa (Chromecast / Google TV / Cabo HDMI)
+  const [w3cCastSupported] = useState<boolean>(
+    () => typeof window !== 'undefined' && 'PresentationRequest' in window
+  );
+  const [w3cCastAvailable, setW3cCastAvailable] = useState<boolean>(false);
+  const [w3cCastActive, setW3cCastActive] = useState<boolean>(false);
+  const [w3cStatusMessage, setW3cStatusMessage] = useState<string | null>(null);
+
+  // Refs estáveis
   const clientIdRef = useRef<string>(getOrCreateClientId());
   const deviceProfileRef = useRef(detectDeviceProfile());
+  const netHashRef = useRef<string>('localdefault');
   const modeRef = useRef<BroadcastMode>(mode);
   const roomIdRef = useRef<string>(roomId);
+  const isModalOpenRef = useRef<boolean>(isBroadcastModalOpen);
   const navStateRef = useRef<BroadcastNavState>(navState);
   const overlayStateRef = useRef<BroadcastOverlayState>(overlayState);
-  const customNotesRef = useRef<Record<string, string>>(customNotes);
-  const presenceRef = useRef<ClientPresence[]>(presence);
   const standaloneDeckPosRef = useRef<{ slideIndex: number; subStep: number }>({
     slideIndex: 0,
     subStep: 0,
   });
-  const roomVersionRef = useRef<number>(1);
+  const activePresenterIdRef = useRef<string>('');
+  const latestNoteRef = useRef<{ key: string; text: string }>({ key: '', text: '' });
+  const lastProcessedSummonNonceRef = useRef<string>('');
 
-  // Refs de transporte WebRTC (PeerJS) e BroadcastChannel
+  // Canais diretos locais (0ms): BroadcastChannel + W3C PresentationConnection
   const bcRef = useRef<BroadcastChannel | null>(null);
-  const roomPeerRef = useRef<Peer | null>(null);
-  const isRoomHubRef = useRef<boolean>(false);
-  const hubConnectionsRef = useRef<Map<string, { conn: DataConnection; meta: ClientPresence }>>(
-    new Map()
-  );
-  const spokeConnRef = useRef<DataConnection | null>(null);
+  const w3cConnectionsRef = useRef<Set<any>>(new Set());
 
-  const beaconPeerRef = useRef<Peer | null>(null);
-  const myBeaconIdRef = useRef<string>('');
-  const scannerPeerRef = useRef<Peer | null>(null);
-  const discoveredMapRef = useRef<Map<string, NetworkDeviceInfo>>(new Map());
-  const netHashRef = useRef<string>('');
-
-  // Controle de cadência ~45fps para canais contínuos WebRTC (evita fila SCTP em celulares)
-  const lastContinuousSentAtRef = useRef<number>(0);
-  const trailingContinuousTimerRef = useRef<number | null>(null);
-  const pendingContinuousMsgRef = useRef<Record<string, unknown> | null>(null);
+  // Controle de cadência para escritas contínuas no Firestore (~12Hz com trailing garantido)
+  const lastCloudContinuousAtRef = useRef<number>(0);
+  const cloudContinuousTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     modeRef.current = mode;
@@ -405,6 +475,10 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   }, [roomId]);
 
   useEffect(() => {
+    isModalOpenRef.current = isBroadcastModalOpen;
+  }, [isBroadcastModalOpen]);
+
+  useEffect(() => {
     navStateRef.current = navState;
   }, [navState]);
 
@@ -412,37 +486,14 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     overlayStateRef.current = overlayState;
   }, [overlayState]);
 
+  // Inicialização diferida (650ms) em modo standalone para manter 60fps puros na entrada da capa
   useEffect(() => {
-    customNotesRef.current = customNotes;
-  }, [customNotes]);
-
-  useEffect(() => {
-    presenceRef.current = presence;
-  }, [presence]);
-
-  // Ativação diferida em 900ms quando em modo standalone para garantir 60fps puros na animação de abertura
-  useEffect(() => {
-    if (p2pActivated) return;
-    const t = window.setTimeout(() => setP2pActivated(true), 900);
+    if (cloudReady) return;
+    const t = window.setTimeout(() => setCloudReady(true), 650);
     return () => window.clearTimeout(t);
-  }, [p2pActivated]);
+  }, [cloudReady]);
 
-  // Resolve hash da rede Wi-Fi pública (uma única vez por sessão)
-  useEffect(() => {
-    if (!p2pActivated) return;
-    let cancelled = false;
-    resolvePublicNetworkHash().then((hash) => {
-      if (!cancelled) {
-        netHashRef.current = hash;
-        setNetHash(hash);
-      }
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [p2pActivated]);
-
-  // Sincroniza URL da barra de endereços sem recarregar
+  // Atualiza URL sem recarregar a página
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const url = new URL(window.location.href);
@@ -458,163 +509,164 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     window.history.replaceState({}, '', url.toString());
   }, [mode, roomId]);
 
-  const buildMyDeviceInfo = useCallback((): NetworkDeviceInfo => {
+  // ==========================================================================
+  // FUNÇÃO DE ESCRITA DE PRESENÇA DO PRÓPRIO DISPOSITIVO (/castDevices/{myClientId})
+  // ==========================================================================
+  const publishMyDevicePresence = useCallback(async () => {
+    if (typeof window === 'undefined') return;
+    const myId = clientIdRef.current;
+    const path = `castDevices/${myId}`;
     const activeSlide =
       modeRef.current === 'standalone'
         ? standaloneDeckPosRef.current.slideIndex
         : navStateRef.current.slideIndex;
-    return {
-      clientId: clientIdRef.current,
-      beaconPeerId: myBeaconIdRef.current || undefined,
-      deviceLabel: deviceProfileRef.current.label,
+
+    const payload = {
+      clientId: myId,
+      appScope: APP_SCOPE,
+      networkHash: sanitizeSafeId(netHashRef.current || 'localdefault', 4, 32),
+      deviceLabel: deviceProfileRef.current.label.slice(0, 80),
       deviceType: deviceProfileRef.current.type,
-      screenResolution: deviceProfileRef.current.resolution,
+      screenResolution: deviceProfileRef.current.resolution.slice(0, 24),
       mode: modeRef.current,
-      roomId: roomIdRef.current,
-      slideIndex: activeSlide,
-      sameNetwork: true,
-      lastSeenAt: Date.now(),
+      roomId: sanitizeRoomCode(roomIdRef.current),
+      slideIndex: Math.max(0, Math.min(20, Math.trunc(activeSlide))),
+      summonRoomId: '',
+      summonSlideIndex: 0,
+      summonSubStep: 0,
+      summonNonce: '',
+      updatedAt: serverTimestamp(),
     };
-  }, []);
 
-  const buildFullRoomSnapshot = useCallback((): RoomSyncState & { serverTime: number } => {
-    const nav = navStateRef.current;
-    const ov = overlayStateRef.current;
-    return {
-      roomId: roomIdRef.current,
-      version: roomVersionRef.current,
-      slideIndex: nav.slideIndex,
-      subStep: nav.subStep,
-      slideCustomState: nav.slideCustomState,
-      blackout: ov.blackout,
-      spotlight: ov.spotlight,
-      pointer: ov.pointer,
-      drawingsBySlide: ov.drawingsBySlide,
-      timer: ov.timer,
-      serverTimeOffsetMs: 0,
-      customNotes: customNotesRef.current,
-      presence: presenceRef.current,
-      serverTime: Date.now(),
-    };
-  }, []);
-
-  const syncDiscoveredStateFromMap = useCallback(() => {
-    const now = Date.now();
-    const list: NetworkDeviceInfo[] = [];
-    discoveredMapRef.current.forEach((dev, id) => {
-      if (id === clientIdRef.current) return;
-      if (now - dev.lastSeenAt > 30000) {
-        discoveredMapRef.current.delete(id);
-        return;
+    try {
+      await setDoc(doc(db, 'castDevices', myId), payload);
+      setConnected(true);
+    } catch (error) {
+      if (isFirestorePermissionError(error)) {
+        handleFirestoreError(error, OperationType.WRITE, path);
       }
-      list.push(dev);
-    });
-    list.sort((a, b) => a.deviceLabel.localeCompare(b.deviceLabel));
-    setNetworkDevices(list);
+    }
   }, []);
 
-  const upsertDiscoveredDevice = useCallback(
-    (dev: NetworkDeviceInfo | undefined | null) => {
-      if (!dev || !dev.clientId || dev.clientId === clientIdRef.current) return;
-      const existing = discoveredMapRef.current.get(dev.clientId);
-      discoveredMapRef.current.set(dev.clientId, {
-        ...existing,
-        ...dev,
-        beaconPeerId: dev.beaconPeerId || existing?.beaconPeerId,
-        sameNetwork: true,
-        lastSeenAt: Date.now(),
-      });
-      syncDiscoveredStateFromMap();
+  // ==========================================================================
+  // FUNÇÃO DE ESCRITA DO ESTADO COMPLETO DA SALA (/castRooms/{roomId})
+  // ==========================================================================
+  const pushRoomStateToFirestore = useCallback(
+    async (explicitRoomId?: string) => {
+      if (typeof window === 'undefined') return;
+      const targetRoom = sanitizeRoomCode(explicitRoomId || roomIdRef.current);
+      const path = `castRooms/${targetRoom}`;
+      const nav = navStateRef.current;
+      const ov = overlayStateRef.current;
+      const currentStrokes = ov.drawingsBySlide[nav.slideIndex] || [];
+
+      const presenterId =
+        modeRef.current === 'presenter'
+          ? clientIdRef.current
+          : activePresenterIdRef.current.slice(0, 64);
+
+      const payload = {
+        roomId: targetRoom,
+        appScope: APP_SCOPE,
+        activePresenterId: presenterId,
+        slideIndex: Math.max(0, Math.min(20, Math.trunc(nav.slideIndex))),
+        subStep: Math.max(0, Math.min(30, Math.trunc(nav.subStep))),
+        blackout: Boolean(ov.blackout),
+        pointerActive: Boolean(ov.pointer?.active),
+        pointerX: clampNum(ov.pointer?.x ?? 0, 0, 1920),
+        pointerY: clampNum(ov.pointer?.y ?? 0, 0, 1080),
+        pointerColor: String(ov.pointer?.color || '#dc143c').slice(0, 16),
+        spotlightActive: Boolean(ov.spotlight?.active),
+        spotlightX: clampNum(ov.spotlight?.x ?? 960, 0, 1920),
+        spotlightY: clampNum(ov.spotlight?.y ?? 540, 0, 1080),
+        economyMetric: nav.slideCustomState.economyMetric,
+        casteTier: nav.slideCustomState.casteTier
+          ? Math.max(0, Math.min(4, Math.trunc(nav.slideCustomState.casteTier)))
+          : 0,
+        timelineLens: nav.slideCustomState.timelineLens,
+        timerRunning: Boolean(ov.timer.running),
+        timerElapsedMs: Math.max(0, Math.min(86400000, Math.trunc(ov.timer.elapsedMs))),
+        timerStartedAtMs: ov.timer.startedAt ? Math.max(0, Math.trunc(ov.timer.startedAt)) : 0,
+        strokesSlideIndex: Math.max(0, Math.min(20, Math.trunc(nav.slideIndex))),
+        strokesCurrentSlide: serializeStrokesForFirestore(currentStrokes),
+        noteKey: latestNoteRef.current.key.slice(0, 16),
+        noteText: latestNoteRef.current.text.slice(0, 4000),
+        updatedBy: clientIdRef.current,
+        updatedAt: serverTimestamp(),
+      };
+
+      try {
+        await setDoc(doc(db, 'castRooms', targetRoom), payload);
+        setConnected(true);
+      } catch (error) {
+        if (isFirestorePermissionError(error)) {
+          handleFirestoreError(error, OperationType.WRITE, path);
+        }
+      }
     },
-    [syncDiscoveredStateFromMap]
+    []
   );
 
-  const applyRemoteCastCommand = useCallback((cmd: RemoteCastCommand) => {
-    if (!cmd || !cmd.roomId) return;
-    const cleanRoom = sanitizePeerRoomToken(cmd.roomId);
-    const clamped = clampPosition(cmd.slideIndex ?? 0, cmd.subStep ?? 0);
+  const scheduleContinuousRoomPush = useCallback(() => {
+    const now = performance.now();
+    const elapsed = now - lastCloudContinuousAtRef.current;
 
-    roomIdRef.current = cleanRoom;
-    modeRef.current = cmd.targetMode;
-    setP2pActivated(true);
-    setRoomId(cleanRoom);
-    setMode(cmd.targetMode);
-    setIsBroadcastModalOpen(false);
-
-    setNavState((prev) => ({
-      ...prev,
-      roomId: cleanRoom,
-      slideIndex: clamped.slideIndex,
-      subStep: clamped.subStep,
-    }));
-    setOverlayState((prev) => ({
-      ...prev,
-      pointer: null,
-    }));
-  }, []);
-
-  const applyRoomSnapshot = useCallback((st: Record<string, any>) => {
-    if (!st) return;
-    const clamped = clampPosition(
-      typeof st.slideIndex === 'number' ? st.slideIndex : 0,
-      typeof st.subStep === 'number' ? st.subStep : 0
-    );
-    const offset = typeof st.serverTime === 'number' ? st.serverTime - Date.now() : 0;
-
-    setNavState((prev) => ({
-      roomId: st.roomId || prev.roomId,
-      slideIndex: clamped.slideIndex,
-      subStep: clamped.subStep,
-      slideCustomState: st.slideCustomState || prev.slideCustomState,
-    }));
-
-    setOverlayState((prev) => ({
-      blackout: Boolean(st.blackout),
-      spotlight: st.spotlight ?? null,
-      pointer: st.pointer ?? null,
-      drawingsBySlide: st.drawingsBySlide || prev.drawingsBySlide,
-      timer: st.timer || prev.timer,
-      serverTimeOffsetMs: offset,
-    }));
-
-    if (st.customNotes && typeof st.customNotes === 'object') {
-      setCustomNotes((prev) => ({ ...prev, ...st.customNotes }));
+    if (elapsed >= 85) {
+      lastCloudContinuousAtRef.current = now;
+      if (cloudContinuousTimerRef.current !== null) {
+        window.clearTimeout(cloudContinuousTimerRef.current);
+        cloudContinuousTimerRef.current = null;
+      }
+      pushRoomStateToFirestore();
+    } else if (cloudContinuousTimerRef.current === null) {
+      cloudContinuousTimerRef.current = window.setTimeout(() => {
+        cloudContinuousTimerRef.current = null;
+        lastCloudContinuousAtRef.current = performance.now();
+        pushRoomStateToFirestore();
+      }, 85 - elapsed);
     }
+  }, [pushRoomStateToFirestore]);
 
-    if (Array.isArray(st.presence)) {
-      setPresence(st.presence);
-    }
-  }, []);
+  const applyRemoteCastCommand = useCallback(
+    (cmd: RemoteCastCommand) => {
+      if (!cmd || !cmd.roomId) return;
+      const cleanRoom = sanitizeRoomCode(cmd.roomId);
+      const clamped = clampPosition(cmd.slideIndex ?? 0, cmd.subStep ?? 0);
 
-  const applyRealtimeRoomMessage = useCallback(
+      roomIdRef.current = cleanRoom;
+      modeRef.current = cmd.targetMode;
+      setCloudReady(true);
+      setRoomId(cleanRoom);
+      setMode(cmd.targetMode);
+      setIsBroadcastModalOpen(false);
+
+      const nextNav: BroadcastNavState = {
+        ...navStateRef.current,
+        roomId: cleanRoom,
+        slideIndex: clamped.slideIndex,
+        subStep: clamped.subStep,
+      };
+      navStateRef.current = nextNav;
+      setNavState(nextNav);
+      setOverlayState((prev) => ({ ...prev, pointer: null }));
+
+      // Confirma imediatamente no Firestore que esta tela entrou como 'screen' na sala!
+      publishMyDevicePresence();
+    },
+    [publishMyDevicePresence]
+  );
+
+  // Processa pacotes locais instantâneos (BroadcastChannel e W3C PresentationConnection)
+  const applyDirectLocalPacket = useCallback(
     (msg: Record<string, any>) => {
       const type = String(msg.type || '');
-
-      if (type === 'lan:summon' && msg.command) {
-        applyRemoteCastCommand(msg.command as RemoteCastCommand);
-        return;
-      }
-
-      if (type === 'room:init' && msg.state) {
-        applyRoomSnapshot(msg.state);
-        return;
-      }
-
-      if (type === 'room:presence' && Array.isArray(msg.presence)) {
-        setPresence(msg.presence);
-        return;
-      }
 
       if (type === 'nav:goto') {
         const pos = clampPosition(Number(msg.slideIndex) || 0, Number(msg.subStep) || 0);
         setNavState((prev) =>
           prev.slideIndex === pos.slideIndex && prev.subStep === pos.subStep
             ? prev
-            : {
-                ...prev,
-                slideIndex: pos.slideIndex,
-                subStep: pos.subStep,
-              }
+            : { ...prev, slideIndex: pos.slideIndex, subStep: pos.subStep }
         );
         if (msg.clearPointer) {
           setOverlayState((prev) => (prev.pointer ? { ...prev, pointer: null } : prev));
@@ -623,10 +675,7 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       }
 
       if (type === 'stage:blackout') {
-        const nextBlackout = Boolean(msg.blackout);
-        setOverlayState((prev) =>
-          prev.blackout === nextBlackout ? prev : { ...prev, blackout: nextBlackout }
-        );
+        setOverlayState((prev) => ({ ...prev, blackout: Boolean(msg.blackout) }));
         return;
       }
 
@@ -649,24 +698,17 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         return;
       }
 
-      if (type === 'draw:upsert') {
+      if (type === 'draw:upsert' && msg.stroke) {
         const sIdx = Number(msg.slideIndex) || 0;
-        const stroke = msg.stroke as DrawingStroke | undefined;
-        if (!stroke || !stroke.id) return;
+        const stroke = msg.stroke as DrawingStroke;
         setOverlayState((prev) => {
           const list = [...(prev.drawingsBySlide[sIdx] || [])];
           const idx = list.findIndex((s) => s.id === stroke.id);
-          if (idx >= 0) {
-            list[idx] = stroke;
-          } else {
-            list.push(stroke);
-          }
+          if (idx >= 0) list[idx] = stroke;
+          else list.push(stroke);
           return {
             ...prev,
-            drawingsBySlide: {
-              ...prev.drawingsBySlide,
-              [sIdx]: list,
-            },
+            drawingsBySlide: { ...prev.drawingsBySlide, [sIdx]: list },
           };
         });
         return;
@@ -679,10 +721,7 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           list.pop();
           return {
             ...prev,
-            drawingsBySlide: {
-              ...prev.drawingsBySlide,
-              [sIdx]: list,
-            },
+            drawingsBySlide: { ...prev.drawingsBySlide, [sIdx]: list },
           };
         });
         return;
@@ -692,10 +731,7 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         const sIdx = Number(msg.slideIndex) || 0;
         setOverlayState((prev) => ({
           ...prev,
-          drawingsBySlide: {
-            ...prev.drawingsBySlide,
-            [sIdx]: [],
-          },
+          drawingsBySlide: { ...prev.drawingsBySlide, [sIdx]: [] },
         }));
         return;
       }
@@ -703,670 +739,23 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       if (type === 'slide:custom' && msg.patch) {
         setNavState((prev) => ({
           ...prev,
-          slideCustomState: {
-            ...prev.slideCustomState,
-            ...msg.patch,
-          },
+          slideCustomState: { ...prev.slideCustomState, ...msg.patch },
         }));
-        return;
-      }
-
-      if (type === 'notes:update') {
-        const key = String(msg.key || '');
-        if (!key) return;
-        const text = String(msg.text ?? '');
-        setCustomNotes((prev) => {
-          const merged = { ...prev, [key]: text };
-          if (typeof window !== 'undefined') {
-            try {
-              window.localStorage.setItem(NOTES_STORAGE_KEY, JSON.stringify(merged));
-            } catch {
-              // Ignora quota
-            }
-          }
-          return merged;
-        });
         return;
       }
 
       if (type === 'timer:sync' && msg.timer) {
-        const offset = typeof msg.serverTime === 'number' ? msg.serverTime - Date.now() : 0;
         setOverlayState((prev) => ({
           ...prev,
           timer: msg.timer as TimerState,
-          serverTimeOffsetMs: offset,
+          serverTimeOffsetMs: 0,
         }));
       }
     },
-    [applyRemoteCastCommand, applyRoomSnapshot]
+    []
   );
 
-  // Recalcula e difunde lista de presença quando este nó atua como Hub WebRTC da sala
-  const recomputeAndBroadcastHubPresence = useCallback(() => {
-    if (!isRoomHubRef.current) return;
-    const list: ClientPresence[] = [];
-
-    if (modeRef.current === 'presenter' || modeRef.current === 'screen') {
-      list.push({
-        clientId: clientIdRef.current,
-        role: modeRef.current,
-        deviceLabel: deviceProfileRef.current.label,
-        connectedAt: Date.now(),
-      });
-    }
-
-    hubConnectionsRef.current.forEach(({ conn, meta }) => {
-      if (conn.open && meta.clientId !== clientIdRef.current) {
-        list.push(meta);
-      }
-    });
-
-    setPresence(list);
-    const packet = { type: 'room:presence', presence: list };
-    hubConnectionsRef.current.forEach(({ conn }) => {
-      if (conn.open) {
-        try {
-          conn.send(packet);
-        } catch {
-          // Ignora
-        }
-      }
-    });
-  }, []);
-
-  // ==========================================================================
-  // CANAL LOCAL INSTANTÂNEO (BroadcastChannel para múltiplas abas / janelas HDMI no mesmo PC)
-  // ==========================================================================
-  useEffect(() => {
-    if (typeof window === 'undefined' || !('BroadcastChannel' in window)) return;
-
-    const bc = new BroadcastChannel(`${PEER_PREFIX}-bc`);
-    bcRef.current = bc;
-
-    bc.onmessage = (ev) => {
-      const data = ev.data;
-      if (!data || data.__senderId === clientIdRef.current) return;
-
-      if (data.type === 'bc:ping') {
-        upsertDiscoveredDevice(data.fromDevice);
-        bc.postMessage({
-          type: 'bc:pong',
-          __senderId: clientIdRef.current,
-          device: buildMyDeviceInfo(),
-        });
-        return;
-      }
-
-      if (data.type === 'bc:pong' && data.device) {
-        upsertDiscoveredDevice(data.device);
-        return;
-      }
-
-      if (data.type === 'bc:summon' && data.command) {
-        const targets: string[] | 'ALL' = data.targetClientIds;
-        if (
-          targets === 'ALL' ||
-          (Array.isArray(targets) && targets.includes(clientIdRef.current))
-        ) {
-          applyRemoteCastCommand(data.command as RemoteCastCommand);
-        }
-        return;
-      }
-
-      if (data.__roomId && data.__roomId === roomIdRef.current) {
-        applyRealtimeRoomMessage(data);
-      }
-    };
-
-    // Anuncia esta aba imediatamente para outras abas abertas
-    bc.postMessage({
-      type: 'bc:ping',
-      __senderId: clientIdRef.current,
-      fromDevice: buildMyDeviceInfo(),
-    });
-
-    return () => {
-      bc.close();
-      bcRef.current = null;
-    };
-  }, [applyRealtimeRoomMessage, applyRemoteCastCommand, buildMyDeviceInfo, upsertDiscoveredDevice]);
-
-  // ==========================================================================
-  // MOTOR WEBRTC 1: SALA DE SINCRONIZAÇÃO EM TEMPO REAL (HUB / SPOKE AUTOMÁTICO)
-  // Funciona em Vercel estático, Google AI Studio (ais-dev ↔ ais-pre), 4G/5G e Wi-Fi!
-  // ==========================================================================
-  useEffect(() => {
-    if (typeof window === 'undefined' || !p2pActivated) return;
-
-    let cancelled = false;
-    let reconnectTimer: number | null = null;
-    const cleanRoom = sanitizePeerRoomToken(roomId);
-    const hubPeerId = `${PEER_PREFIX}-room-${cleanRoom}`;
-
-    const cleanupRoomPeers = () => {
-      if (reconnectTimer !== null) {
-        window.clearTimeout(reconnectTimer);
-        reconnectTimer = null;
-      }
-      hubConnectionsRef.current.forEach(({ conn }) => {
-        try {
-          conn.close();
-        } catch {
-          // Ignora
-        }
-      });
-      hubConnectionsRef.current.clear();
-
-      if (spokeConnRef.current) {
-        try {
-          spokeConnRef.current.close();
-        } catch {
-          // Ignora
-        }
-        spokeConnRef.current = null;
-      }
-
-      if (roomPeerRef.current) {
-        try {
-          roomPeerRef.current.destroy();
-        } catch {
-          // Ignora
-        }
-        roomPeerRef.current = null;
-      }
-      isRoomHubRef.current = false;
-    };
-
-    const connectAsSpoke = () => {
-      if (cancelled) return;
-      cleanupRoomPeers();
-
-      const spokePeer = new Peer(PEER_CONFIG);
-      roomPeerRef.current = spokePeer;
-      isRoomHubRef.current = false;
-
-      spokePeer.on('open', () => {
-        if (cancelled) return;
-        const conn = spokePeer.connect(hubPeerId, { reliable: true });
-        spokeConnRef.current = conn;
-
-        conn.on('open', () => {
-          if (cancelled) return;
-          setConnected(true);
-          const effectiveRole: 'presenter' | 'screen' =
-            modeRef.current === 'presenter' ? 'presenter' : 'screen';
-          conn.send({
-            type: 'peer:hello',
-            clientId: clientIdRef.current,
-            role: effectiveRole,
-            deviceLabel: deviceProfileRef.current.label,
-            initialPos:
-              modeRef.current === 'presenter'
-                ? {
-                    slideIndex: navStateRef.current.slideIndex,
-                    subStep: navStateRef.current.subStep,
-                  }
-                : undefined,
-          });
-        });
-
-        conn.on('data', (raw: any) => {
-          if (cancelled || !raw || typeof raw !== 'object') return;
-          applyRealtimeRoomMessage(raw as Record<string, any>);
-        });
-
-        conn.on('close', () => {
-          if (cancelled) return;
-          setConnected(false);
-          // Caso o Hub anterior tenha fechado/recarregado, renegocia liderança após breve jitter
-          reconnectTimer = window.setTimeout(() => {
-            bootRoomTopology();
-          }, 380 + Math.floor(Math.random() * 320));
-        });
-
-        conn.on('error', () => {
-          if (cancelled) return;
-          reconnectTimer = window.setTimeout(() => {
-            bootRoomTopology();
-          }, 700);
-        });
-      });
-
-      spokePeer.on('error', () => {
-        if (cancelled) return;
-        setConnected(false);
-        reconnectTimer = window.setTimeout(() => {
-          bootRoomTopology();
-        }, 900);
-      });
-    };
-
-    const bootRoomTopology = () => {
-      if (cancelled) return;
-      cleanupRoomPeers();
-
-      const candidateHub = new Peer(hubPeerId, PEER_CONFIG);
-      roomPeerRef.current = candidateHub;
-
-      candidateHub.on('open', () => {
-        if (cancelled) return;
-        isRoomHubRef.current = true;
-        setConnected(true);
-        recomputeAndBroadcastHubPresence();
-      });
-
-      candidateHub.on('connection', (conn) => {
-        if (cancelled) return;
-
-        conn.on('data', (raw: any) => {
-          if (cancelled || !raw || typeof raw !== 'object') return;
-          const msg = raw as Record<string, any>;
-
-          if (msg.type === 'peer:hello') {
-            const remoteRole: 'presenter' | 'screen' =
-              msg.role === 'presenter' ? 'presenter' : 'screen';
-            const remoteClientId = String(msg.clientId || conn.peer);
-
-            hubConnectionsRef.current.set(conn.peer, {
-              conn,
-              meta: {
-                clientId: remoteClientId,
-                role: remoteRole,
-                deviceLabel: String(msg.deviceLabel || 'Dispositivo Conectado'),
-                connectedAt: Date.now(),
-              },
-            });
-
-            // Se esta tela estava em modo standalone (ex: usuário escaneou o QR Code "QR para Celular" ou digitou o código),
-            // promove automaticamente esta tela para Telão ('screen') preservando o slide em que ela estava!
-            if (modeRef.current === 'standalone' && remoteRole === 'presenter') {
-              const localPos = clampPosition(
-                standaloneDeckPosRef.current.slideIndex,
-                standaloneDeckPosRef.current.subStep
-              );
-              modeRef.current = 'screen';
-              setMode('screen');
-              setIsBroadcastModalOpen(false);
-              navStateRef.current = {
-                ...navStateRef.current,
-                roomId: cleanRoom,
-                slideIndex: localPos.slideIndex,
-                subStep: localPos.subStep,
-              };
-              setNavState(navStateRef.current);
-            }
-
-            recomputeAndBroadcastHubPresence();
-
-            // Envia snapshot completo da sala imediatamente ao novo participante
-            try {
-              conn.send({
-                type: 'room:init',
-                state: buildFullRoomSnapshot(),
-              });
-            } catch {
-              // Ignora
-            }
-            return;
-          }
-
-          // Aplica no próprio Hub
-          applyRealtimeRoomMessage(msg);
-
-          // Retransmite imediatamente para todos os outros peers da sala (ex: múltiplos telões + controles)
-          hubConnectionsRef.current.forEach(({ conn: peerConn }, peerKey) => {
-            if (peerKey !== conn.peer && peerConn.open) {
-              try {
-                peerConn.send(msg);
-              } catch {
-                // Ignora
-              }
-            }
-          });
-        });
-
-        conn.on('close', () => {
-          hubConnectionsRef.current.delete(conn.peer);
-          recomputeAndBroadcastHubPresence();
-        });
-
-        conn.on('error', () => {
-          hubConnectionsRef.current.delete(conn.peer);
-          recomputeAndBroadcastHubPresence();
-        });
-      });
-
-      candidateHub.on('error', (err: any) => {
-        if (cancelled) return;
-        if (err?.type === 'unavailable-id') {
-          // Já existe um Hub ativo para esta sala (ex: o Telão ou outro Apresentador): conecta como Spoke!
-          connectAsSpoke();
-          return;
-        }
-        setConnected(false);
-        reconnectTimer = window.setTimeout(() => {
-          bootRoomTopology();
-        }, 1200);
-      });
-    };
-
-    bootRoomTopology();
-
-    return () => {
-      cancelled = true;
-      cleanupRoomPeers();
-    };
-  }, [
-    p2pActivated,
-    roomId,
-    applyRealtimeRoomMessage,
-    buildFullRoomSnapshot,
-    recomputeAndBroadcastHubPresence,
-  ]);
-
-  // Atualiza presença quando o próprio modo do Hub muda (standalone <-> screen <-> presenter)
-  useEffect(() => {
-    if (isRoomHubRef.current) {
-      recomputeAndBroadcastHubPresence();
-    } else if (spokeConnRef.current?.open) {
-      const effectiveRole: 'presenter' | 'screen' =
-        mode === 'presenter' ? 'presenter' : 'screen';
-      try {
-        spokeConnRef.current.send({
-          type: 'peer:hello',
-          clientId: clientIdRef.current,
-          role: effectiveRole,
-          deviceLabel: deviceProfileRef.current.label,
-        });
-      } catch {
-        // Ignora
-      }
-    }
-  }, [mode, recomputeAndBroadcastHubPresence]);
-
-  // ==========================================================================
-  // MOTOR WEBRTC 2: BEACON DE DESCOBERTA AUTOMÁTICA NA REDE WI-FI (SLOTS 0..5)
-  // Qualquer computador/TV/celular com a apresentação aberta anuncia presença no lobby
-  // do IP público da rede Wi-Fi e aceita comando direto de "Transmitir"!
-  // ==========================================================================
-  useEffect(() => {
-    if (typeof window === 'undefined' || !p2pActivated || !netHash) return;
-    if (mode === 'presenter') {
-      // Apresentadores escaneiam telas, não precisam ocupar slot de Telão receptor
-      if (beaconPeerRef.current) {
-        beaconPeerRef.current.destroy();
-        beaconPeerRef.current = null;
-        myBeaconIdRef.current = '';
-      }
-      return;
-    }
-
-    let cancelled = false;
-    let retryTimer: number | null = null;
-
-    const tryClaimSlot = (slotIndex: number) => {
-      if (cancelled) return;
-      if (slotIndex >= LAN_SLOT_COUNT) {
-        // Todos os 6 slots ocupados; tenta novamente em 8s
-        retryTimer = window.setTimeout(() => tryClaimSlot(0), 8000);
-        return;
-      }
-
-      const candidateId = `${PEER_PREFIX}-lan-${netHash}-s${slotIndex}`;
-      const p = new Peer(candidateId, PEER_CONFIG);
-      beaconPeerRef.current = p;
-
-      p.on('open', (id) => {
-        if (cancelled) {
-          p.destroy();
-          return;
-        }
-        myBeaconIdRef.current = id;
-      });
-
-      p.on('connection', (conn) => {
-        if (cancelled) return;
-        conn.on('data', (raw: any) => {
-          if (cancelled || !raw || typeof raw !== 'object') return;
-          const msg = raw as Record<string, any>;
-
-          if (msg.type === 'lan:ping') {
-            if (msg.fromDevice) {
-              upsertDiscoveredDevice(msg.fromDevice as NetworkDeviceInfo);
-            }
-            try {
-              conn.send({
-                type: 'lan:pong',
-                device: buildMyDeviceInfo(),
-              });
-            } catch {
-              // Ignora
-            }
-            return;
-          }
-
-          if (msg.type === 'lan:summon' && msg.command) {
-            try {
-              conn.send({
-                type: 'lan:ack',
-                clientId: clientIdRef.current,
-              });
-            } catch {
-              // Ignora
-            }
-            applyRemoteCastCommand(msg.command as RemoteCastCommand);
-          }
-        });
-      });
-
-      p.on('error', (err: any) => {
-        if (cancelled) return;
-        try {
-          p.destroy();
-        } catch {
-          // Ignora
-        }
-        if (err?.type === 'unavailable-id') {
-          tryClaimSlot(slotIndex + 1);
-        } else {
-          retryTimer = window.setTimeout(() => tryClaimSlot(0), 3000);
-        }
-      });
-    };
-
-    tryClaimSlot(0);
-
-    return () => {
-      cancelled = true;
-      if (retryTimer !== null) window.clearTimeout(retryTimer);
-      if (beaconPeerRef.current) {
-        try {
-          beaconPeerRef.current.destroy();
-        } catch {
-          // Ignora
-        }
-        beaconPeerRef.current = null;
-        myBeaconIdRef.current = '';
-      }
-    };
-  }, [
-    p2pActivated,
-    netHash,
-    mode,
-    applyRemoteCastCommand,
-    buildMyDeviceInfo,
-    upsertDiscoveredDevice,
-  ]);
-
-  // Garante um Peer de saída reutilizável para escaneamento rápido da rede Wi-Fi
-  const ensureScannerPeer = useCallback((): Promise<Peer> => {
-    return new Promise((resolve, reject) => {
-      const existing = scannerPeerRef.current;
-      if (existing && !existing.destroyed && !existing.disconnected && existing.id) {
-        resolve(existing);
-        return;
-      }
-      if (existing) {
-        try {
-          existing.destroy();
-        } catch {
-          // Ignora
-        }
-      }
-      const p = new Peer(PEER_CONFIG);
-      scannerPeerRef.current = p;
-      const timeout = window.setTimeout(() => {
-        reject(new Error('Peer scan timeout'));
-      }, 4500);
-      p.once('open', () => {
-        window.clearTimeout(timeout);
-        resolve(p);
-      });
-      p.once('error', (err) => {
-        window.clearTimeout(timeout);
-        reject(err);
-      });
-    });
-  }, []);
-
-  useEffect(() => {
-    return () => {
-      if (scannerPeerRef.current) {
-        try {
-          scannerPeerRef.current.destroy();
-        } catch {
-          // Ignora
-        }
-        scannerPeerRef.current = null;
-      }
-    };
-  }, []);
-
-  /**
-   * Varre instantaneamente todas as telas abertas na mesma rede Wi-Fi (via slots WebRTC + BroadcastChannel)
-   */
-  const scanNetworkDevices = useCallback(async () => {
-    if (typeof window === 'undefined') return;
-    setIsScanningNetwork(true);
-
-    // 1. Ping instantâneo em abas locais
-    if (bcRef.current) {
-      try {
-        bcRef.current.postMessage({
-          type: 'bc:ping',
-          __senderId: clientIdRef.current,
-          fromDevice: buildMyDeviceInfo(),
-        });
-      } catch {
-        // Ignora
-      }
-    }
-
-    try {
-      const activeHash = netHashRef.current || (await resolvePublicNetworkHash());
-      netHashRef.current = activeHash;
-      if (!netHash) setNetHash(activeHash);
-
-      const scanner = await ensureScannerPeer();
-      const myDevice = buildMyDeviceInfo();
-
-      const probes: Promise<void>[] = [];
-      for (let s = 0; s < LAN_SLOT_COUNT; s++) {
-        const targetBeaconId = `${PEER_PREFIX}-lan-${activeHash}-s${s}`;
-        if (targetBeaconId === myBeaconIdRef.current) continue;
-
-        probes.push(
-          new Promise<void>((resolveProbe) => {
-            let settled = false;
-            const finish = () => {
-              if (settled) return;
-              settled = true;
-              resolveProbe();
-            };
-
-            const timer = window.setTimeout(() => {
-              try {
-                conn.close();
-              } catch {
-                // Ignora
-              }
-              finish();
-            }, 1600);
-
-            const conn = scanner.connect(targetBeaconId, { reliable: true });
-
-            conn.on('open', () => {
-              try {
-                conn.send({ type: 'lan:ping', fromDevice: myDevice });
-              } catch {
-                // Ignora
-              }
-            });
-
-            conn.on('data', (raw: any) => {
-              if (raw && typeof raw === 'object' && raw.type === 'lan:pong' && raw.device) {
-                upsertDiscoveredDevice({
-                  ...(raw.device as NetworkDeviceInfo),
-                  beaconPeerId: targetBeaconId,
-                });
-              }
-              window.clearTimeout(timer);
-              window.setTimeout(() => {
-                try {
-                  conn.close();
-                } catch {
-                  // Ignora
-                }
-              }, 80);
-              finish();
-            });
-
-            conn.on('error', () => {
-              window.clearTimeout(timer);
-              finish();
-            });
-
-            conn.on('close', () => {
-              window.clearTimeout(timer);
-              finish();
-            });
-          })
-        );
-      }
-
-      await Promise.all(probes);
-      syncDiscoveredStateFromMap();
-    } catch {
-      // Silencioso caso offline
-    } finally {
-      setIsScanningNetwork(false);
-    }
-  }, [buildMyDeviceInfo, ensureScannerPeer, netHash, syncDiscoveredStateFromMap, upsertDiscoveredDevice]);
-
-  // Varredura automática APENAS quando o modal de transmissão está aberto ou no Console sem telão conectado
-  // (Zero tráfego de varredura durante a apresentação normal dos slides!)
-  useEffect(() => {
-    const screensConnected = presence.some((p) => p.role === 'screen');
-    const shouldAutoScan =
-      isBroadcastModalOpen || (mode === 'presenter' && !screensConnected);
-
-    if (!shouldAutoScan) return;
-
-    setP2pActivated(true);
-    scanNetworkDevices();
-
-    const intervalMs = isBroadcastModalOpen ? 4500 : 7500;
-    const id = window.setInterval(() => {
-      scanNetworkDevices();
-    }, intervalMs);
-
-    return () => window.clearInterval(id);
-  }, [isBroadcastModalOpen, mode, presence, scanNetworkDevices]);
-
-  // ==========================================================================
-  // ENVIO DE EVENTOS DE SALA (DISCRETOS E CONTÍNUOS A ~45FPS)
-  // ==========================================================================
-  const transmitPacketNow = useCallback((packet: Record<string, unknown>) => {
+  const sendDirectLocalFastPath = useCallback((packet: Record<string, unknown>) => {
     const activeRoom = roomIdRef.current;
 
     if (bcRef.current) {
@@ -1381,59 +770,490 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       }
     }
 
-    if (isRoomHubRef.current) {
-      hubConnectionsRef.current.forEach(({ conn }) => {
-        if (conn.open) {
-          try {
-            conn.send(packet);
-          } catch {
-            // Ignora
+    if (w3cConnectionsRef.current.size > 0) {
+      const serialized = JSON.stringify({
+        ...packet,
+        __senderId: clientIdRef.current,
+        __roomId: activeRoom,
+      });
+      w3cConnectionsRef.current.forEach((conn) => {
+        try {
+          if (conn.state === 'connected') {
+            conn.send(serialized);
           }
+        } catch {
+          // Ignora
         }
       });
-    } else if (spokeConnRef.current?.open) {
-      try {
-        spokeConnRef.current.send(packet);
-      } catch {
-        // Ignora
-      }
     }
   }, []);
 
-  const sendContinuousPacket = useCallback(
-    (packet: Record<string, unknown>) => {
-      const now = performance.now();
-      const elapsed = now - lastContinuousSentAtRef.current;
+  // ==========================================================================
+  // CAMADA LOCAL 1: BroadcastChannel (0ms entre abas/janelas HDMI no mesmo PC)
+  // ==========================================================================
+  useEffect(() => {
+    if (typeof window === 'undefined' || !('BroadcastChannel' in window)) return;
 
-      if (elapsed >= 22) {
-        lastContinuousSentAtRef.current = now;
-        pendingContinuousMsgRef.current = null;
-        if (trailingContinuousTimerRef.current !== null) {
-          window.clearTimeout(trailingContinuousTimerRef.current);
-          trailingContinuousTimerRef.current = null;
+    const bc = new BroadcastChannel(BC_CHANNEL_NAME);
+    bcRef.current = bc;
+
+    bc.onmessage = (ev) => {
+      const data = ev.data;
+      if (!data || data.__senderId === clientIdRef.current) return;
+
+      if (data.type === 'bc:summon' && data.command) {
+        const targets: string[] | 'ALL' = data.targetClientIds;
+        if (
+          targets === 'ALL' ||
+          (Array.isArray(targets) && targets.includes(clientIdRef.current))
+        ) {
+          applyRemoteCastCommand(data.command as RemoteCastCommand);
         }
-        transmitPacketNow(packet);
-      } else {
-        pendingContinuousMsgRef.current = packet;
-        if (trailingContinuousTimerRef.current === null) {
-          trailingContinuousTimerRef.current = window.setTimeout(() => {
-            trailingContinuousTimerRef.current = null;
-            lastContinuousSentAtRef.current = performance.now();
-            const latest = pendingContinuousMsgRef.current;
-            pendingContinuousMsgRef.current = null;
-            if (latest) transmitPacketNow(latest);
-          }, 22 - elapsed);
+        return;
+      }
+
+      if (data.__roomId && data.__roomId === roomIdRef.current) {
+        applyDirectLocalPacket(data);
+      }
+    };
+
+    return () => {
+      bc.close();
+      bcRef.current = null;
+    };
+  }, [applyDirectLocalPacket, applyRemoteCastCommand]);
+
+  // ==========================================================================
+  // CAMADA NATIVA 2: W3C Presentation API (Chromecast / Google TV / Cabo HDMI)
+  // ==========================================================================
+  const wireW3cConnection = useCallback(
+    (conn: any) => {
+      if (!conn) return;
+      w3cConnectionsRef.current.add(conn);
+      setW3cCastActive(true);
+
+      conn.onmessage = (event: any) => {
+        try {
+          const parsed = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
+          if (parsed && parsed.__senderId !== clientIdRef.current) {
+            applyDirectLocalPacket(parsed);
+          }
+        } catch {
+          // Ignora
+        }
+      };
+
+      const cleanup = () => {
+        w3cConnectionsRef.current.delete(conn);
+        setW3cCastActive(w3cConnectionsRef.current.size > 0);
+      };
+
+      conn.onclose = cleanup;
+      conn.onterminate = cleanup;
+    },
+    [applyDirectLocalPacket]
+  );
+
+  // Monitora disponibilidade de telas nativas no navegador (W3C PresentationRequest)
+  useEffect(() => {
+    if (typeof window === 'undefined' || !w3cCastSupported || !isBroadcastModalOpen) return;
+
+    let availabilityObj: any = null;
+    let cancelled = false;
+
+    try {
+      const PR = (window as any).PresentationRequest;
+      const receiverUrl = `${resolvePublicReceiverBaseUrl()}/?sala=${encodeURIComponent(
+        roomId
+      )}&modo=tela&w3c=1`;
+      const req = new PR([receiverUrl]);
+      req
+        .getAvailability()
+        .then((avail: any) => {
+          if (cancelled) return;
+          availabilityObj = avail;
+          setW3cCastAvailable(Boolean(avail.value));
+          avail.onchange = () => {
+            setW3cCastAvailable(Boolean(avail.value));
+          };
+        })
+        .catch(() => {
+          // Alguns navegadores não suportam sondagem passiva mas permitem req.start() ao clicar
+          if (!cancelled) setW3cCastAvailable(true);
+        });
+    } catch {
+      // Ignora caso restrito por iframe
+    }
+
+    return () => {
+      cancelled = true;
+      if (availabilityObj) {
+        availabilityObj.onchange = null;
+      }
+    };
+  }, [w3cCastSupported, isBroadcastModalOpen, roomId]);
+
+  // Se esta instância foi aberta como Receptor Nativo W3C em uma Smart TV / Monitor HDMI
+  useEffect(() => {
+    if (typeof navigator === 'undefined') return;
+    const navPres = (navigator as any).presentation;
+    if (!navPres?.receiver?.connectionList) return;
+
+    let cancelled = false;
+    navPres.receiver.connectionList
+      .then((list: any) => {
+        if (cancelled) return;
+        (list.connections || []).forEach((c: any) => wireW3cConnection(c));
+        list.onconnectionavailable = (ev: any) => {
+          if (ev?.connection) wireW3cConnection(ev.connection);
+        };
+      })
+      .catch(() => {
+        // Ignora
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [wireW3cConnection]);
+
+  // ==========================================================================
+  // CAMADA CLOUD 3A: PRESENÇA E ESCUTA DE CONVOCAÇÃO REMOTA (/castDevices/{myClientId})
+  // ==========================================================================
+  useEffect(() => {
+    if (typeof window === 'undefined' || !cloudReady) return;
+
+    let cancelled = false;
+    const myId = clientIdRef.current;
+    const myDocRef = doc(db, 'castDevices', myId);
+    const myPath = `castDevices/${myId}`;
+
+    resolvePublicNetworkHash().then((hash) => {
+      if (cancelled) return;
+      netHashRef.current = hash;
+      publishMyDevicePresence();
+    });
+
+    const unsubSelf = onSnapshot(
+      myDocRef,
+      (snap) => {
+        setConnected(true);
+        if (!snap.exists()) return;
+        const data = snap.data();
+        const nonce = String(data.summonNonce || '');
+        const targetRoom = String(data.summonRoomId || '');
+
+        if (nonce && targetRoom && nonce !== lastProcessedSummonNonceRef.current) {
+          lastProcessedSummonNonceRef.current = nonce;
+          applyRemoteCastCommand({
+            id: nonce,
+            roomId: targetRoom,
+            targetMode: 'screen',
+            slideIndex: Number(data.summonSlideIndex) || 0,
+            subStep: Number(data.summonSubStep) || 0,
+            fromDeviceLabel: 'Apresentador',
+            createdAt: Date.now(),
+          });
+        }
+      },
+      (error) => {
+        if (isFirestorePermissionError(error)) {
+          handleFirestoreError(error, OperationType.GET, myPath);
         }
       }
-    },
-    [transmitPacketNow]
-  );
+    );
+
+    const heartbeatTimer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        publishMyDevicePresence();
+      }
+    }, 45_000);
+
+    const handlePageHide = () => {
+      deleteDoc(myDocRef).catch(() => {});
+    };
+    window.addEventListener('pagehide', handlePageHide);
+
+    return () => {
+      cancelled = true;
+      unsubSelf();
+      window.clearInterval(heartbeatTimer);
+      window.removeEventListener('pagehide', handlePageHide);
+    };
+  }, [cloudReady, applyRemoteCastCommand, publishMyDevicePresence]);
+
+  // Atualiza presença quando modo ou sala mudam
+  useEffect(() => {
+    if (!cloudReady) return;
+    publishMyDevicePresence();
+  }, [cloudReady, mode, roomId, navState.slideIndex, publishMyDevicePresence]);
+
+  // ==========================================================================
+  // CAMADA CLOUD 3B: RADAR EM TEMPO REAL DE TELAS ABERTAS (/castDevices)
+  // Ativo apenas enquanto o modal Transmitir está aberto ou no Console do Apresentador
+  // ==========================================================================
+  const parseDevicesSnapshot = useCallback((docsData: Array<Record<string, any>>) => {
+    // Usa o maior updatedAt do servidor como referência imune a relógios desajustados!
+    let referenceServerMs = 0;
+    const withMillis = docsData.map((d) => {
+      const ts = d.updatedAt as Timestamp | null | undefined;
+      const ms = ts && typeof ts.toMillis === 'function' ? ts.toMillis() : Date.now();
+      if (ms > referenceServerMs) referenceServerMs = ms;
+      return { raw: d, ms };
+    });
+
+    if (referenceServerMs === 0) referenceServerMs = Date.now();
+    const myHash = netHashRef.current;
+
+    const activeList: NetworkDeviceInfo[] = [];
+    for (const { raw, ms } of withMillis) {
+      const cId = String(raw.clientId || '');
+      if (!cId || cId === clientIdRef.current) continue;
+      if (referenceServerMs - ms > DEVICE_TTL_MS) continue;
+
+      const devHash = String(raw.networkHash || '');
+      const isSameWifi =
+        Boolean(myHash) && myHash !== 'localdefault' && devHash === myHash;
+
+      activeList.push({
+        clientId: cId,
+        deviceLabel: String(raw.deviceLabel || 'Tela Conectada'),
+        deviceType:
+          raw.deviceType === 'tv' || raw.deviceType === 'mobile'
+            ? raw.deviceType
+            : 'desktop',
+        screenResolution: String(raw.screenResolution || '1920×1080'),
+        mode:
+          raw.mode === 'presenter' || raw.mode === 'screen'
+            ? raw.mode
+            : 'standalone',
+        roomId: String(raw.roomId || ''),
+        slideIndex: Number(raw.slideIndex) || 0,
+        sameNetwork: isSameWifi,
+        lastSeenAt: ms,
+      });
+    }
+
+    // Ordena priorizando telas na mesma rede Wi-Fi e telas já conectadas à sala
+    activeList.sort((a, b) => {
+      if (a.sameNetwork !== b.sameNetwork) return a.sameNetwork ? -1 : 1;
+      return a.deviceLabel.localeCompare(b.deviceLabel);
+    });
+
+    setNetworkDevices(activeList);
+  }, []);
+
+  useEffect(() => {
+    const shouldListenDevices = isBroadcastModalOpen || mode === 'presenter';
+    if (typeof window === 'undefined' || !shouldListenDevices) return;
+
+    setCloudReady(true);
+    const q = query(collection(db, 'castDevices'), where('appScope', '==', APP_SCOPE));
+
+    const unsubList = onSnapshot(
+      q,
+      (snap) => {
+        setConnected(true);
+        const docsData = snap.docs.map((d) => d.data());
+        parseDevicesSnapshot(docsData);
+      },
+      (error) => {
+        if (isFirestorePermissionError(error)) {
+          handleFirestoreError(error, OperationType.LIST, 'castDevices');
+        }
+      }
+    );
+
+    return () => {
+      unsubList();
+    };
+  }, [isBroadcastModalOpen, mode, parseDevicesSnapshot]);
+
+  const scanNetworkDevices = useCallback(async () => {
+    if (typeof window === 'undefined') return;
+    setIsScanningNetwork(true);
+    setCloudReady(true);
+    try {
+      await publishMyDevicePresence();
+      const q = query(collection(db, 'castDevices'), where('appScope', '==', APP_SCOPE));
+      const snap = await getDocs(q);
+      parseDevicesSnapshot(snap.docs.map((d) => d.data()));
+    } catch (error) {
+      if (isFirestorePermissionError(error)) {
+        handleFirestoreError(error, OperationType.LIST, 'castDevices');
+      }
+    } finally {
+      setIsScanningNetwork(false);
+    }
+  }, [parseDevicesSnapshot, publishMyDevicePresence]);
+
+  // ==========================================================================
+  // CAMADA CLOUD 3C: SINCRONIZAÇÃO EM TEMPO REAL DA SALA (/castRooms/{roomId})
+  // ==========================================================================
+  useEffect(() => {
+    const shouldSubscribeRoom = mode !== 'standalone' || isBroadcastModalOpen;
+    if (typeof window === 'undefined' || !shouldSubscribeRoom) return;
+
+    const cleanRoom = sanitizeRoomCode(roomId);
+    const roomDocRef = doc(db, 'castRooms', cleanRoom);
+    const roomPath = `castRooms/${cleanRoom}`;
+
+    const unsubRoom = onSnapshot(
+      roomDocRef,
+      (snap) => {
+        setConnected(true);
+        if (!snap.exists()) return;
+        // Ignora eco otimista local das próprias escritas em trânsito
+        if (snap.metadata.hasPendingWrites) return;
+
+        const d = snap.data();
+        const remotePresenterId = String(d.activePresenterId || '');
+        activePresenterIdRef.current = remotePresenterId;
+
+        // Se o usuário estava com o modal de QR Code aberto no PC/TV (modo standalone) e escaneou
+        // "QR para Celular" no smartphone, promove automaticamente esta tela para Telão!
+        if (
+          modeRef.current === 'standalone' &&
+          isModalOpenRef.current &&
+          remotePresenterId &&
+          remotePresenterId !== clientIdRef.current
+        ) {
+          modeRef.current = 'screen';
+          setMode('screen');
+          setIsBroadcastModalOpen(false);
+          publishMyDevicePresence();
+        }
+
+        // Se somos o Apresentador que emitiu esta mesma atualização, evita sobrescrever cursor/traço local
+        if (modeRef.current === 'presenter' && d.updatedBy === clientIdRef.current) {
+          return;
+        }
+
+        const clamped = clampPosition(
+          Number(d.slideIndex) || 0,
+          Number(d.subStep) || 0
+        );
+
+        const nextEconomy =
+          d.economyMetric === 'gdp' || d.economyMetric === 'hdi'
+            ? d.economyMetric
+            : 'perCapita';
+        const rawTier = Number(d.casteTier) || 0;
+        const nextTier = rawTier >= 1 && rawTier <= 4 ? rawTier : null;
+        const nextLens =
+          d.timelineLens === 'panorama' || d.timelineLens === 'era'
+            ? d.timelineLens
+            : 'auto';
+
+        setNavState((prev) => ({
+          roomId: cleanRoom,
+          slideIndex: clamped.slideIndex,
+          subStep: clamped.subStep,
+          slideCustomState: {
+            economyMetric: nextEconomy,
+            casteTier: nextTier,
+            timelineLens: nextLens,
+          },
+        }));
+
+        const sIdx = Number(d.strokesSlideIndex) ?? clamped.slideIndex;
+        const decodedStrokes = deserializeStrokesFromFirestore(d.strokesCurrentSlide);
+
+        setOverlayState((prev) => ({
+          blackout: Boolean(d.blackout),
+          pointer: d.pointerActive
+            ? {
+                active: true,
+                x: Number(d.pointerX) || 0,
+                y: Number(d.pointerY) || 0,
+                color: String(d.pointerColor || '#dc143c'),
+                updatedAt: Date.now(),
+              }
+            : null,
+          spotlight: d.spotlightActive
+            ? {
+                active: true,
+                x: Number(d.spotlightX) || 960,
+                y: Number(d.spotlightY) || 540,
+              }
+            : null,
+          drawingsBySlide: {
+            ...prev.drawingsBySlide,
+            [sIdx]: decodedStrokes,
+          },
+          timer: {
+            running: Boolean(d.timerRunning),
+            elapsedMs: Number(d.timerElapsedMs) || 0,
+            startedAt: d.timerStartedAtMs ? Number(d.timerStartedAtMs) : null,
+          },
+          serverTimeOffsetMs: 0,
+        }));
+
+        const incomingNoteKey = String(d.noteKey || '');
+        if (incomingNoteKey) {
+          const incomingNoteText = String(d.noteText ?? '');
+          setCustomNotes((prev) => {
+            if (prev[incomingNoteKey] === incomingNoteText) return prev;
+            const merged = { ...prev, [incomingNoteKey]: incomingNoteText };
+            try {
+              window.localStorage.setItem(NOTES_STORAGE_KEY, JSON.stringify(merged));
+            } catch {
+              // Ignora
+            }
+            return merged;
+          });
+        }
+      },
+      (error) => {
+        if (isFirestorePermissionError(error)) {
+          handleFirestoreError(error, OperationType.GET, roomPath);
+        }
+      }
+    );
+
+    return () => {
+      unsubRoom();
+    };
+  }, [mode, roomId, isBroadcastModalOpen, publishMyDevicePresence]);
+
+  // Deriva lista consolidada de presença (Telões e Controles conectados à sala atual)
+  const presence = useMemo<ClientPresence[]>(() => {
+    const list: ClientPresence[] = [];
+    if (mode === 'presenter' || mode === 'screen') {
+      list.push({
+        clientId: clientIdRef.current,
+        role: mode,
+        deviceLabel: deviceProfileRef.current.label,
+        connectedAt: 0,
+      });
+    }
+    for (const dev of networkDevices) {
+      if (dev.roomId === roomId && (dev.mode === 'screen' || dev.mode === 'presenter')) {
+        list.push({
+          clientId: dev.clientId,
+          role: dev.mode,
+          deviceLabel: dev.deviceLabel,
+          connectedAt: dev.lastSeenAt,
+        });
+      }
+    }
+    if (w3cCastActive && !list.some((p) => p.role === 'screen')) {
+      list.push({
+        clientId: 'w3c-native-screen',
+        role: 'screen',
+        deviceLabel: 'Tela Cast / HDMI Nativa',
+        connectedAt: 0,
+      });
+    }
+    return list;
+  }, [mode, roomId, networkDevices, w3cCastActive]);
 
   // ==========================================================================
   // AÇÕES PÚBLICAS ESTÁVEIS (IDENTIDADE IMUTÁVEL)
   // ==========================================================================
   const openBroadcastModal = useCallback(() => {
-    setP2pActivated(true);
+    setCloudReady(true);
+    setW3cStatusMessage(null);
     setIsBroadcastModalOpen(true);
   }, []);
 
@@ -1442,12 +1262,16 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   }, []);
 
   const reportStandaloneDeckPosition = useCallback((slideIndex: number, subStep: number) => {
+    const prev = standaloneDeckPosRef.current;
     standaloneDeckPosRef.current = { slideIndex, subStep };
-  }, []);
+    if (prev.slideIndex !== slideIndex && modeRef.current === 'standalone') {
+      publishMyDevicePresence();
+    }
+  }, [publishMyDevicePresence]);
 
   const startPresenting = useCallback(
     (customRoomId?: string, initialPos?: { slideIndex: number; subStep: number }) => {
-      const targetRoom = sanitizePeerRoomToken(
+      const targetRoom = sanitizeRoomCode(
         customRoomId || roomIdRef.current || generateRoomCode()
       );
       const fallbackPos =
@@ -1462,9 +1286,10 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         initialPos?.subStep ?? fallbackPos.subStep
       );
 
-      setP2pActivated(true);
+      setCloudReady(true);
       roomIdRef.current = targetRoom;
       modeRef.current = 'presenter';
+      activePresenterIdRef.current = clientIdRef.current;
       setRoomId(targetRoom);
       setMode('presenter');
       setIsBroadcastModalOpen(false);
@@ -1477,24 +1302,30 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       };
       navStateRef.current = nextNav;
       setNavState(nextNav);
-      setOverlayState((prev) => ({ ...prev, pointer: null }));
+      overlayStateRef.current = { ...overlayStateRef.current, pointer: null };
+      setOverlayState(overlayStateRef.current);
 
-      transmitPacketNow({
+      sendDirectLocalFastPath({
         type: 'nav:goto',
         slideIndex: clamped.slideIndex,
         subStep: clamped.subStep,
         clearPointer: true,
       });
+      pushRoomStateToFirestore(targetRoom);
+      publishMyDevicePresence();
     },
-    [transmitPacketNow]
+    [publishMyDevicePresence, pushRoomStateToFirestore, sendDirectLocalFastPath]
   );
 
+  /**
+   * Transmite em 1 clique para 1 ou todas as telas abertas detectadas no Firebase Cloud / LAN!
+   */
   const castToDevices = useCallback(
     async (
       targetClientIds: string[] | 'ALL',
       initialPos?: { slideIndex: number; subStep: number }
     ) => {
-      const targetRoom = sanitizePeerRoomToken(roomIdRef.current || generateRoomCode());
+      const targetRoom = sanitizeRoomCode(roomIdRef.current || generateRoomCode());
       const fallbackPos =
         modeRef.current === 'standalone'
           ? standaloneDeckPosRef.current
@@ -1507,9 +1338,10 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         initialPos?.subStep ?? fallbackPos.subStep
       );
 
-      setP2pActivated(true);
+      setCloudReady(true);
       roomIdRef.current = targetRoom;
       modeRef.current = 'presenter';
+      activePresenterIdRef.current = clientIdRef.current;
       setRoomId(targetRoom);
       setMode('presenter');
       setIsBroadcastModalOpen(false);
@@ -1522,154 +1354,181 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       };
       navStateRef.current = nextNav;
       setNavState(nextNav);
-      setOverlayState((prev) => ({ ...prev, pointer: null }));
+      overlayStateRef.current = { ...overlayStateRef.current, pointer: null };
+      setOverlayState(overlayStateRef.current);
 
-      transmitPacketNow({
-        type: 'nav:goto',
-        slideIndex: clamped.slideIndex,
-        subStep: clamped.subStep,
-        clearPointer: true,
-      });
+      const nonce = `cmd-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 
-      const command: RemoteCastCommand = {
-        id: `cmd-${Date.now().toString(36)}`,
-        roomId: targetRoom,
-        targetMode: 'screen',
-        slideIndex: clamped.slideIndex,
-        subStep: clamped.subStep,
-        fromDeviceLabel: deviceProfileRef.current.label,
-        createdAt: Date.now(),
-      };
-
-      // 1. Aciona abas locais imediatamente via BroadcastChannel
+      // 1. Aciona abas locais imediatamente
       if (bcRef.current) {
         try {
           bcRef.current.postMessage({
             type: 'bc:summon',
             __senderId: clientIdRef.current,
             targetClientIds,
-            command,
+            command: {
+              id: nonce,
+              roomId: targetRoom,
+              targetMode: 'screen',
+              slideIndex: clamped.slideIndex,
+              subStep: clamped.subStep,
+              fromDeviceLabel: deviceProfileRef.current.label,
+              createdAt: Date.now(),
+            } satisfies RemoteCastCommand,
           });
         } catch {
           // Ignora
         }
       }
 
-      // 2. Aciona telas na mesma rede Wi-Fi via WebRTC direto nos Beacons detectados
-      const targets: NetworkDeviceInfo[] = [];
-      discoveredMapRef.current.forEach((dev) => {
-        if (dev.clientId === clientIdRef.current) return;
-        if (targetClientIds === 'ALL' || targetClientIds.includes(dev.clientId)) {
-          targets.push(dev);
+      // 2. Grava estado inicial da sala no Firestore imediatamente
+      await pushRoomStateToFirestore(targetRoom);
+      publishMyDevicePresence();
+
+      // 3. Envia comando de Summon instantâneo para cada tela alvo no Firestore (/castDevices/{id})
+      let candidateIds: string[] = [];
+      if (targetClientIds === 'ALL') {
+        const q = query(collection(db, 'castDevices'), where('appScope', '==', APP_SCOPE));
+        try {
+          const snap = await getDocs(q);
+          candidateIds = snap.docs
+            .map((d) => d.data())
+            .filter((d) => d.clientId && d.clientId !== clientIdRef.current && d.mode !== 'presenter')
+            .map((d) => String(d.clientId));
+        } catch (error) {
+          if (isFirestorePermissionError(error)) {
+            handleFirestoreError(error, OperationType.LIST, 'castDevices');
+          }
         }
-      });
-
-      if (targets.length === 0) return;
-
-      try {
-        const scanner = await ensureScannerPeer();
-        await Promise.all(
-          targets.map(
-            (dev) =>
-              new Promise<void>((resolveSummon) => {
-                if (!dev.beaconPeerId) {
-                  resolveSummon();
-                  return;
-                }
-                let done = false;
-                const finish = () => {
-                  if (done) return;
-                  done = true;
-                  resolveSummon();
-                };
-
-                const timer = window.setTimeout(() => {
-                  try {
-                    conn.close();
-                  } catch {
-                    // Ignora
-                  }
-                  finish();
-                }, 2500);
-
-                const conn = scanner.connect(dev.beaconPeerId, { reliable: true });
-
-                conn.on('open', () => {
-                  try {
-                    conn.send({ type: 'lan:summon', command });
-                  } catch {
-                    // Ignora
-                  }
-                });
-
-                conn.on('data', (raw: any) => {
-                  if (raw && typeof raw === 'object' && raw.type === 'lan:ack') {
-                    window.clearTimeout(timer);
-                    window.setTimeout(() => {
-                      try {
-                        conn.close();
-                      } catch {
-                        // Ignora
-                      }
-                    }, 120);
-                    finish();
-                  }
-                });
-
-                conn.on('error', () => {
-                  window.clearTimeout(timer);
-                  finish();
-                });
-              })
-          )
-        );
-      } catch {
-        // Caso o beacon já tenha migrado para a sala, o roomPeer sincronizará automaticamente
+      } else {
+        candidateIds = targetClientIds.filter((id) => id && id !== clientIdRef.current);
       }
+
+      await Promise.all(
+        candidateIds.map(async (targetId) => {
+          const path = `castDevices/${targetId}`;
+          try {
+            await updateDoc(doc(db, 'castDevices', targetId), {
+              summonRoomId: targetRoom,
+              summonSlideIndex: Math.max(0, Math.min(20, Math.trunc(clamped.slideIndex))),
+              summonSubStep: Math.max(0, Math.min(30, Math.trunc(clamped.subStep))),
+              summonNonce: nonce,
+              updatedAt: serverTimestamp(),
+            });
+          } catch (error) {
+            if (isFirestorePermissionError(error)) {
+              handleFirestoreError(error, OperationType.UPDATE, path);
+            }
+          }
+        })
+      );
     },
-    [ensureScannerPeer]
+    [publishMyDevicePresence, pushRoomStateToFirestore]
   );
 
-  const joinAsScreen = useCallback((targetRoomId: string) => {
-    const clean = sanitizePeerRoomToken(targetRoomId);
-    if (!clean) return;
-    setP2pActivated(true);
-    roomIdRef.current = clean;
-    modeRef.current = 'screen';
-    setRoomId(clean);
-    setMode('screen');
-    setIsBroadcastModalOpen(false);
-    setNavState((prev) => ({ ...prev, roomId: clean }));
-  }, []);
+  /**
+   * Abre o seletor nativo de telas do Chrome / Edge / Android (W3C Presentation API)
+   * para transmitir direto a um Chromecast, Google TV ou segundo monitor HDMI!
+   */
+  const startW3cNativeCast = useCallback(
+    async (initialPos?: { slideIndex: number; subStep: number }) => {
+      if (typeof window === 'undefined' || !('PresentationRequest' in window)) {
+        setW3cStatusMessage(
+          'Seu navegador atual não possui seletor Cast nativo (exclusivo Chrome/Edge/Android). Use a lista de Telas Detectadas ou o QR Code abaixo!'
+        );
+        return;
+      }
 
-  const joinAsPresenter = useCallback((targetRoomId: string) => {
-    const clean = sanitizePeerRoomToken(targetRoomId);
-    if (!clean) return;
-    setP2pActivated(true);
-    roomIdRef.current = clean;
-    modeRef.current = 'presenter';
-    setRoomId(clean);
-    setMode('presenter');
-    setIsBroadcastModalOpen(false);
-    setNavState((prev) => ({ ...prev, roomId: clean }));
-  }, []);
+      setW3cStatusMessage(null);
+      const targetRoom = sanitizeRoomCode(roomIdRef.current || generateRoomCode());
+      const receiverUrl = `${resolvePublicReceiverBaseUrl()}/?sala=${encodeURIComponent(
+        targetRoom
+      )}&modo=tela&w3c=1`;
+
+      try {
+        const PR = (window as any).PresentationRequest;
+        const req = new PR([receiverUrl]);
+        const conn = await req.start();
+        wireW3cConnection(conn);
+        startPresenting(targetRoom, initialPos);
+      } catch (err: any) {
+        const errName = String(err?.name || '');
+        if (errName === 'NotAllowedError' || errName === 'AbortError') {
+          // Usuário fechou o seletor nativo sem escolher uma tela
+          return;
+        }
+        if (window.self !== window.top || errName === 'SecurityError') {
+          setW3cStatusMessage(
+            'O seletor Cast nativo do navegador exige abrir a apresentação fora do quadro de pré-visualização (na aba pública ou na Vercel). Já as Telas Detectadas abaixo funcionam em qualquer ambiente!'
+          );
+        } else {
+          setW3cStatusMessage(
+            'Nenhuma tela Chromecast ou HDMI compatível respondeu ao navegador. Abra o link na TV/PC para usar a conexão direta em nuvem abaixo.'
+          );
+        }
+      }
+    },
+    [startPresenting, wireW3cConnection]
+  );
+
+  const joinAsScreen = useCallback(
+    (targetRoomId: string) => {
+      const clean = sanitizeRoomCode(targetRoomId);
+      setCloudReady(true);
+      roomIdRef.current = clean;
+      modeRef.current = 'screen';
+      setRoomId(clean);
+      setMode('screen');
+      setIsBroadcastModalOpen(false);
+      setNavState((prev) => ({ ...prev, roomId: clean }));
+      publishMyDevicePresence();
+    },
+    [publishMyDevicePresence]
+  );
+
+  const joinAsPresenter = useCallback(
+    (targetRoomId: string) => {
+      const clean = sanitizeRoomCode(targetRoomId);
+      setCloudReady(true);
+      roomIdRef.current = clean;
+      modeRef.current = 'presenter';
+      activePresenterIdRef.current = clientIdRef.current;
+      setRoomId(clean);
+      setMode('presenter');
+      setIsBroadcastModalOpen(false);
+      setNavState((prev) => ({ ...prev, roomId: clean }));
+      publishMyDevicePresence();
+      // Registra presença de apresentador na sala para promover telas aguardando QR
+      pushRoomStateToFirestore(clean);
+    },
+    [publishMyDevicePresence, pushRoomStateToFirestore]
+  );
 
   const leaveBroadcast = useCallback(() => {
     modeRef.current = 'standalone';
     setMode('standalone');
     setIsBroadcastModalOpen(false);
+    w3cConnectionsRef.current.forEach((conn) => {
+      try {
+        conn.terminate?.();
+      } catch {
+        // Ignora
+      }
+    });
+    w3cConnectionsRef.current.clear();
+    setW3cCastActive(false);
     setOverlayState((prev) => ({
       ...prev,
       blackout: false,
       pointer: null,
       spotlight: null,
     }));
-  }, []);
+    publishMyDevicePresence();
+  }, [publishMyDevicePresence]);
 
   const goToPosition = useCallback(
     (slideIndex: number, subStep: number) => {
       const pos = clampPosition(slideIndex, subStep);
-      roomVersionRef.current += 1;
       const nextNav: BroadcastNavState = {
         ...navStateRef.current,
         slideIndex: pos.slideIndex,
@@ -1677,32 +1536,33 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       };
       navStateRef.current = nextNav;
       setNavState(nextNav);
-      setOverlayState((prev) => (prev.pointer ? { ...prev, pointer: null } : prev));
 
-      transmitPacketNow({
+      if (overlayStateRef.current.pointer) {
+        overlayStateRef.current = { ...overlayStateRef.current, pointer: null };
+        setOverlayState(overlayStateRef.current);
+      }
+
+      sendDirectLocalFastPath({
         type: 'nav:goto',
         slideIndex: pos.slideIndex,
         subStep: pos.subStep,
         clearPointer: true,
       });
+      pushRoomStateToFirestore();
     },
-    [transmitPacketNow]
+    [pushRoomStateToFirestore, sendDirectLocalFastPath]
   );
 
   const stepForwardBroadcast = useCallback(() => {
     const curr = navStateRef.current;
     const next = getNextPosition(curr.slideIndex, curr.subStep);
-    if (next) {
-      goToPosition(next.slideIndex, next.subStep);
-    }
+    if (next) goToPosition(next.slideIndex, next.subStep);
   }, [goToPosition]);
 
   const stepBackwardBroadcast = useCallback(() => {
     const curr = navStateRef.current;
     const prev = getPrevPosition(curr.slideIndex, curr.subStep);
-    if (prev) {
-      goToPosition(prev.slideIndex, prev.subStep);
-    }
+    if (prev) goToPosition(prev.slideIndex, prev.subStep);
   }, [goToPosition]);
 
   const nextSlideBroadcast = useCallback(() => {
@@ -1721,23 +1581,26 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   const setBlackout = useCallback(
     (blackout: boolean) => {
-      setOverlayState((prev) => ({ ...prev, blackout }));
-      transmitPacketNow({ type: 'stage:blackout', blackout });
+      overlayStateRef.current = { ...overlayStateRef.current, blackout };
+      setOverlayState(overlayStateRef.current);
+      sendDirectLocalFastPath({ type: 'stage:blackout', blackout });
+      pushRoomStateToFirestore();
     },
-    [transmitPacketNow]
+    [pushRoomStateToFirestore, sendDirectLocalFastPath]
   );
 
   const setSpotlight = useCallback(
     (spotlight: SpotlightState | null) => {
-      setOverlayState((prev) => ({ ...prev, spotlight }));
+      overlayStateRef.current = { ...overlayStateRef.current, spotlight };
+      setOverlayState(overlayStateRef.current);
+      sendDirectLocalFastPath({ type: 'stage:spotlight', spotlight });
       if (!spotlight) {
-        pendingContinuousMsgRef.current = null;
-        transmitPacketNow({ type: 'stage:spotlight', spotlight: null });
+        pushRoomStateToFirestore();
       } else {
-        sendContinuousPacket({ type: 'stage:spotlight', spotlight });
+        scheduleContinuousRoomPush();
       }
     },
-    [transmitPacketNow, sendContinuousPacket]
+    [pushRoomStateToFirestore, scheduleContinuousRoomPush, sendDirectLocalFastPath]
   );
 
   const emitPointer = useCallback(
@@ -1745,98 +1608,107 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       const pointerObj: PointerState | null = active
         ? { active: true, x, y, color, updatedAt: Date.now() }
         : null;
-      setOverlayState((prev) => ({ ...prev, pointer: pointerObj }));
+      overlayStateRef.current = { ...overlayStateRef.current, pointer: pointerObj };
+      setOverlayState(overlayStateRef.current);
 
-      const payload = {
+      sendDirectLocalFastPath({
         type: 'pointer:move',
         active,
-        x: Math.round(x * 10) / 10,
-        y: Math.round(y * 10) / 10,
+        x: clampNum(x, 0, 1920),
+        y: clampNum(y, 0, 1080),
         color,
-      };
+      });
 
       if (!active) {
-        pendingContinuousMsgRef.current = null;
-        transmitPacketNow(payload);
+        if (cloudContinuousTimerRef.current !== null) {
+          window.clearTimeout(cloudContinuousTimerRef.current);
+          cloudContinuousTimerRef.current = null;
+        }
+        pushRoomStateToFirestore();
       } else {
-        sendContinuousPacket(payload);
+        scheduleContinuousRoomPush();
       }
     },
-    [transmitPacketNow, sendContinuousPacket]
+    [pushRoomStateToFirestore, scheduleContinuousRoomPush, sendDirectLocalFastPath]
   );
 
   const upsertStroke = useCallback(
     (slideIndex: number, stroke: DrawingStroke) => {
-      setOverlayState((prev) => {
-        const list = [...(prev.drawingsBySlide[slideIndex] || [])];
-        const idx = list.findIndex((s) => s.id === stroke.id);
-        if (idx >= 0) {
-          list[idx] = stroke;
-        } else {
-          list.push(stroke);
-        }
-        return {
-          ...prev,
-          drawingsBySlide: {
-            ...prev.drawingsBySlide,
-            [slideIndex]: list,
-          },
-        };
-      });
+      const prevOv = overlayStateRef.current;
+      const list = [...(prevOv.drawingsBySlide[slideIndex] || [])];
+      const idx = list.findIndex((s) => s.id === stroke.id);
+      if (idx >= 0) list[idx] = stroke;
+      else list.push(stroke);
 
-      sendContinuousPacket({
-        type: 'draw:upsert',
-        slideIndex,
-        stroke,
-      });
+      overlayStateRef.current = {
+        ...prevOv,
+        drawingsBySlide: {
+          ...prevOv.drawingsBySlide,
+          [slideIndex]: list,
+        },
+      };
+      setOverlayState(overlayStateRef.current);
+
+      sendDirectLocalFastPath({ type: 'draw:upsert', slideIndex, stroke });
+      scheduleContinuousRoomPush();
     },
-    [sendContinuousPacket]
+    [scheduleContinuousRoomPush, sendDirectLocalFastPath]
   );
 
   const undoStroke = useCallback(
     (slideIndex: number) => {
-      setOverlayState((prev) => {
-        const list = [...(prev.drawingsBySlide[slideIndex] || [])];
-        list.pop();
-        return {
-          ...prev,
-          drawingsBySlide: {
-            ...prev.drawingsBySlide,
-            [slideIndex]: list,
-          },
-        };
-      });
-      transmitPacketNow({ type: 'draw:undo', slideIndex });
+      const prevOv = overlayStateRef.current;
+      const list = [...(prevOv.drawingsBySlide[slideIndex] || [])];
+      list.pop();
+      overlayStateRef.current = {
+        ...prevOv,
+        drawingsBySlide: {
+          ...prevOv.drawingsBySlide,
+          [slideIndex]: list,
+        },
+      };
+      setOverlayState(overlayStateRef.current);
+
+      sendDirectLocalFastPath({ type: 'draw:undo', slideIndex });
+      pushRoomStateToFirestore();
     },
-    [transmitPacketNow]
+    [pushRoomStateToFirestore, sendDirectLocalFastPath]
   );
 
   const clearStrokes = useCallback(
     (slideIndex: number) => {
-      setOverlayState((prev) => ({
-        ...prev,
+      const prevOv = overlayStateRef.current;
+      overlayStateRef.current = {
+        ...prevOv,
         drawingsBySlide: {
-          ...prev.drawingsBySlide,
+          ...prevOv.drawingsBySlide,
           [slideIndex]: [],
         },
-      }));
-      transmitPacketNow({ type: 'draw:clear', slideIndex });
+      };
+      setOverlayState(overlayStateRef.current);
+
+      sendDirectLocalFastPath({ type: 'draw:clear', slideIndex });
+      pushRoomStateToFirestore();
     },
-    [transmitPacketNow]
+    [pushRoomStateToFirestore, sendDirectLocalFastPath]
   );
 
   const updateSlideCustomState = useCallback(
     (patch: Partial<SlideCustomState>) => {
-      setNavState((prev) => ({
-        ...prev,
+      const nextNav: BroadcastNavState = {
+        ...navStateRef.current,
         slideCustomState: {
-          ...prev.slideCustomState,
+          ...navStateRef.current.slideCustomState,
           ...patch,
         },
-      }));
-      transmitPacketNow({ type: 'slide:custom', patch });
+      };
+      navStateRef.current = nextNav;
+      setNavState(nextNav);
+
+      sendDirectLocalFastPath({ type: 'slide:custom', patch });
+      pushRoomStateToFirestore();
     },
-    [transmitPacketNow]
+    [pushRoomStateToFirestore, sendDirectLocalFastPath]
   );
 
   const getNoteForStep = useCallback(
@@ -1854,8 +1726,11 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const updateNoteForStep = useCallback(
     (slideIndex: number, subStep: number, text: string) => {
       const key = makeNoteKey(slideIndex, subStep);
+      const truncated = text.slice(0, 4000);
+      latestNoteRef.current = { key, text: truncated };
+
       setCustomNotes((prev) => {
-        const merged = { ...prev, [key]: text };
+        const merged = { ...prev, [key]: truncated };
         if (typeof window !== 'undefined') {
           try {
             window.localStorage.setItem(NOTES_STORAGE_KEY, JSON.stringify(merged));
@@ -1865,9 +1740,10 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         }
         return merged;
       });
-      transmitPacketNow({ type: 'notes:update', key, text });
+
+      scheduleContinuousRoomPush();
     },
-    [transmitPacketNow]
+    [scheduleContinuousRoomPush]
   );
 
   const timerAction = useCallback(
@@ -1888,19 +1764,17 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         nextTimer = { running: false, elapsedMs: 0, startedAt: null };
       }
 
-      setOverlayState((prev) => ({
-        ...prev,
+      overlayStateRef.current = {
+        ...overlayStateRef.current,
         timer: nextTimer,
         serverTimeOffsetMs: 0,
-      }));
+      };
+      setOverlayState(overlayStateRef.current);
 
-      transmitPacketNow({
-        type: 'timer:sync',
-        timer: nextTimer,
-        serverTime: now,
-      });
+      sendDirectLocalFastPath({ type: 'timer:sync', timer: nextTimer });
+      pushRoomStateToFirestore();
     },
-    [transmitPacketNow]
+    [pushRoomStateToFirestore, sendDirectLocalFastPath]
   );
 
   const navContextValue = useMemo<BroadcastContextValue>(
@@ -1914,6 +1788,7 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       reportStandaloneDeckPosition,
       startPresenting,
       castToDevices,
+      startW3cNativeCast,
       joinAsScreen,
       joinAsPresenter,
       leaveBroadcast,
@@ -1942,6 +1817,7 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       reportStandaloneDeckPosition,
       startPresenting,
       castToDevices,
+      startW3cNativeCast,
       joinAsScreen,
       joinAsPresenter,
       leaveBroadcast,
@@ -1972,6 +1848,10 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       presence,
       customNotes,
       getNoteForStep,
+      w3cCastSupported,
+      w3cCastAvailable,
+      w3cCastActive,
+      w3cStatusMessage,
     }),
     [
       connected,
@@ -1981,6 +1861,10 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       presence,
       customNotes,
       getNoteForStep,
+      w3cCastSupported,
+      w3cCastAvailable,
+      w3cCastActive,
+      w3cStatusMessage,
     ]
   );
 

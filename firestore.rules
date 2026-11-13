@@ -1,0 +1,262 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global Safety Net: Default-deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Reusable Hardened Primitives
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 64 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidRoomCode(code) {
+      return code is string && code.size() >= 1 && code.size() <= 16 && code.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidStrokeSample(stroke) {
+      return stroke is map
+        && stroke.keys().hasAll(['id', 'tool', 'color', 'width', 'pts'])
+        && stroke.keys().hasOnly(['id', 'tool', 'color', 'width', 'pts'])
+        && stroke.id is string && stroke.id.size() >= 1 && stroke.id.size() <= 48
+        && stroke.tool is string && stroke.tool.size() <= 16
+        && stroke.color is string && stroke.color.size() <= 16
+        && stroke.width is number && stroke.width >= 1 && stroke.width <= 40
+        && stroke.pts is list && stroke.pts.size() <= 600;
+    }
+
+    // Validation Blueprint: CastDevice (/castDevices/{deviceId})
+    function isValidCastDevice(data) {
+      return data.keys().hasAll([
+        'clientId',
+        'appScope',
+        'networkHash',
+        'deviceLabel',
+        'deviceType',
+        'screenResolution',
+        'mode',
+        'roomId',
+        'slideIndex',
+        'summonRoomId',
+        'summonSlideIndex',
+        'summonSubStep',
+        'summonNonce',
+        'updatedAt'
+      ])
+      && data.keys().hasOnly([
+        'clientId',
+        'appScope',
+        'networkHash',
+        'deviceLabel',
+        'deviceType',
+        'screenResolution',
+        'mode',
+        'roomId',
+        'slideIndex',
+        'summonRoomId',
+        'summonSlideIndex',
+        'summonSubStep',
+        'summonNonce',
+        'updatedAt'
+      ])
+      && data.clientId is string && data.clientId.size() >= 4 && data.clientId.size() <= 64 && data.clientId.matches('^[a-zA-Z0-9_\\-]+$')
+      && data.appScope is string && data.appScope == 'missao-nepal-v1' && data.appScope.size() <= 32
+      && data.networkHash is string && data.networkHash.size() >= 4 && data.networkHash.size() <= 32 && data.networkHash.matches('^[a-zA-Z0-9_\\-]+$')
+      && data.deviceLabel is string && data.deviceLabel.size() >= 1 && data.deviceLabel.size() <= 80
+      && data.deviceType is string && data.deviceType.size() <= 16 && (data.deviceType == 'desktop' || data.deviceType == 'mobile' || data.deviceType == 'tv')
+      && data.screenResolution is string && data.screenResolution.size() >= 3 && data.screenResolution.size() <= 24
+      && data.mode is string && data.mode.size() <= 16 && (data.mode == 'standalone' || data.mode == 'presenter' || data.mode == 'screen')
+      && isValidRoomCode(data.roomId)
+      && data.slideIndex is int && data.slideIndex >= 0 && data.slideIndex <= 20
+      && data.summonRoomId is string && data.summonRoomId.size() <= 16 && (data.summonRoomId.size() == 0 || data.summonRoomId.matches('^[a-zA-Z0-9_\\-]+$'))
+      && data.summonSlideIndex is int && data.summonSlideIndex >= 0 && data.summonSlideIndex <= 20
+      && data.summonSubStep is int && data.summonSubStep >= 0 && data.summonSubStep <= 30
+      && data.summonNonce is string && data.summonNonce.size() <= 64
+      && data.updatedAt == request.time;
+    }
+
+    // Validation Blueprint: CastRoom (/castRooms/{roomId})
+    function isValidCastRoom(data) {
+      return data.keys().hasAll([
+        'roomId',
+        'appScope',
+        'activePresenterId',
+        'slideIndex',
+        'subStep',
+        'blackout',
+        'pointerActive',
+        'pointerX',
+        'pointerY',
+        'pointerColor',
+        'spotlightActive',
+        'spotlightX',
+        'spotlightY',
+        'economyMetric',
+        'casteTier',
+        'timelineLens',
+        'timerRunning',
+        'timerElapsedMs',
+        'timerStartedAtMs',
+        'strokesSlideIndex',
+        'strokesCurrentSlide',
+        'noteKey',
+        'noteText',
+        'updatedBy',
+        'updatedAt'
+      ])
+      && data.keys().hasOnly([
+        'roomId',
+        'appScope',
+        'activePresenterId',
+        'slideIndex',
+        'subStep',
+        'blackout',
+        'pointerActive',
+        'pointerX',
+        'pointerY',
+        'pointerColor',
+        'spotlightActive',
+        'spotlightX',
+        'spotlightY',
+        'economyMetric',
+        'casteTier',
+        'timelineLens',
+        'timerRunning',
+        'timerElapsedMs',
+        'timerStartedAtMs',
+        'strokesSlideIndex',
+        'strokesCurrentSlide',
+        'noteKey',
+        'noteText',
+        'updatedBy',
+        'updatedAt'
+      ])
+      && isValidRoomCode(data.roomId)
+      && data.appScope is string && data.appScope == 'missao-nepal-v1' && data.appScope.size() <= 32
+      && data.activePresenterId is string && data.activePresenterId.size() <= 64
+      && data.slideIndex is int && data.slideIndex >= 0 && data.slideIndex <= 20
+      && data.subStep is int && data.subStep >= 0 && data.subStep <= 30
+      && data.blackout is bool
+      && data.pointerActive is bool
+      && data.pointerX is number && data.pointerX >= 0 && data.pointerX <= 1920
+      && data.pointerY is number && data.pointerY >= 0 && data.pointerY <= 1080
+      && data.pointerColor is string && data.pointerColor.size() >= 4 && data.pointerColor.size() <= 16
+      && data.spotlightActive is bool
+      && data.spotlightX is number && data.spotlightX >= 0 && data.spotlightX <= 1920
+      && data.spotlightY is number && data.spotlightY >= 0 && data.spotlightY <= 1080
+      && data.economyMetric is string && data.economyMetric.size() <= 16 && (data.economyMetric == 'perCapita' || data.economyMetric == 'gdp' || data.economyMetric == 'hdi')
+      && data.casteTier is int && data.casteTier >= 0 && data.casteTier <= 4
+      && data.timelineLens is string && data.timelineLens.size() <= 16 && (data.timelineLens == 'auto' || data.timelineLens == 'panorama' || data.timelineLens == 'era')
+      && data.timerRunning is bool
+      && data.timerElapsedMs is number && data.timerElapsedMs >= 0 && data.timerElapsedMs <= 86400000
+      && data.timerStartedAtMs is number && data.timerStartedAtMs >= 0
+      && data.strokesSlideIndex is int && data.strokesSlideIndex >= 0 && data.strokesSlideIndex <= 20
+      && data.strokesCurrentSlide is list && data.strokesCurrentSlide.size() <= 80 && (data.strokesCurrentSlide.size() == 0 || isValidStrokeSample(data.strokesCurrentSlide[0]))
+      && data.noteKey is string && data.noteKey.size() <= 16
+      && data.noteText is string && data.noteText.size() <= 4000
+      && data.updatedBy is string && data.updatedBy.size() >= 4 && data.updatedBy.size() <= 64 && data.updatedBy.matches('^[a-zA-Z0-9_\\-]+$')
+      && data.updatedAt == request.time;
+    }
+
+    // Boot Connectivity Check Path
+    match /test/{testId} {
+      allow get: if testId == 'connection';
+    }
+
+    // Ephemeral Screen Discovery Beacons (Zero PII)
+    match /castDevices/{deviceId} {
+      allow get: if isValidId(deviceId);
+      allow list: if existing().appScope == 'missao-nepal-v1';
+
+      allow create: if isValidId(deviceId)
+        && isValidCastDevice(incoming())
+        && incoming().clientId == deviceId;
+
+      allow update: if isValidId(deviceId)
+        && isValidCastDevice(incoming())
+        && incoming().clientId == existing().clientId
+        && incoming().appScope == existing().appScope
+        && (
+          // Action 1: Self presence/status heartbeat
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'networkHash',
+            'deviceLabel',
+            'deviceType',
+            'screenResolution',
+            'mode',
+            'roomId',
+            'slideIndex',
+            'summonRoomId',
+            'summonSlideIndex',
+            'summonSubStep',
+            'summonNonce',
+            'updatedAt'
+          ])
+          ||
+          // Action 2: Remote Cast Summon from Presenter
+          (
+            incoming().summonRoomId.size() >= 1
+            && incoming().summonNonce.size() >= 4
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'summonRoomId',
+              'summonSlideIndex',
+              'summonSubStep',
+              'summonNonce',
+              'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if isValidId(deviceId) && existing().appScope == 'missao-nepal-v1';
+    }
+
+    // Ephemeral Presentation Rooms (Scoped by Capability Room Code, Zero PII)
+    match /castRooms/{roomId} {
+      allow get: if isValidRoomCode(roomId);
+
+      allow create: if isValidRoomCode(roomId)
+        && isValidCastRoom(incoming())
+        && incoming().roomId == roomId;
+
+      allow update: if isValidRoomCode(roomId)
+        && isValidCastRoom(incoming())
+        && incoming().roomId == existing().roomId
+        && incoming().appScope == existing().appScope
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'activePresenterId',
+          'slideIndex',
+          'subStep',
+          'blackout',
+          'pointerActive',
+          'pointerX',
+          'pointerY',
+          'pointerColor',
+          'spotlightActive',
+          'spotlightX',
+          'spotlightY',
+          'economyMetric',
+          'casteTier',
+          'timelineLens',
+          'timerRunning',
+          'timerElapsedMs',
+          'timerStartedAtMs',
+          'strokesSlideIndex',
+          'strokesCurrentSlide',
+          'noteKey',
+          'noteText',
+          'updatedBy',
+          'updatedAt'
+        ]);
+    }
+  }
+}
