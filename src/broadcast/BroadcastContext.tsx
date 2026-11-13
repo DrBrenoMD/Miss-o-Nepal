@@ -14,6 +14,8 @@ import {
   SlideCustomState,
   SpotlightState,
   NetworkInfoResponse,
+  NetworkDeviceInfo,
+  RemoteCastCommand,
 } from './types';
 import {
   clampPosition,
@@ -28,21 +30,64 @@ const CLIENT_ID_KEY = 'missao_nepal_client_id_v1';
 
 function getOrCreateClientId(): string {
   if (typeof window === 'undefined') return 'server';
-  const existing = window.sessionStorage.getItem(CLIENT_ID_KEY);
-  if (existing) return existing;
-  const created = `dev-${Math.random().toString(36).slice(2, 8)}-${Date.now().toString(36)}`;
-  window.sessionStorage.setItem(CLIENT_ID_KEY, created);
-  return created;
+  try {
+    const existing = window.sessionStorage.getItem(CLIENT_ID_KEY);
+    if (existing) return existing;
+    const created = `dev-${Math.random().toString(36).slice(2, 8)}-${Date.now().toString(36)}`;
+    window.sessionStorage.setItem(CLIENT_ID_KEY, created);
+    return created;
+  } catch {
+    return `dev-${Math.random().toString(36).slice(2, 9)}`;
+  }
 }
 
-function detectDeviceLabel(): string {
-  if (typeof navigator === 'undefined') return 'Dispositivo';
+function detectDeviceProfile(): {
+  label: string;
+  type: 'desktop' | 'mobile' | 'tv';
+  resolution: string;
+} {
+  if (typeof navigator === 'undefined' || typeof window === 'undefined') {
+    return { label: 'Dispositivo', type: 'desktop', resolution: '1920×1080' };
+  }
   const ua = navigator.userAgent || '';
-  if (/iPhone|iPad|iPod/i.test(ua)) return 'iPhone / iPad';
-  if (/Android/i.test(ua)) return 'Celular Android';
-  if (/Macintosh/i.test(ua)) return 'Computador Mac';
-  if (/Windows/i.test(ua)) return 'Computador Windows';
-  return 'Navegador Web';
+  const sw = window.screen?.width || window.innerWidth || 1920;
+  const sh = window.screen?.height || window.innerHeight || 1080;
+  const resolution = `${sw}×${sh}`;
+
+  const browser = /Edg\//i.test(ua)
+    ? 'Edge'
+    : /Chrome\//i.test(ua) && !/Chromium/i.test(ua)
+    ? 'Chrome'
+    : /Safari\//i.test(ua) && !/Chrome/i.test(ua)
+    ? 'Safari'
+    : /Firefox\//i.test(ua)
+    ? 'Firefox'
+    : '';
+
+  const withBrowser = (osName: string) => (browser ? `${osName} · ${browser}` : osName);
+
+  if (/SmartTV|Tizen|Web0S|BRAVIA|AFT|TV/i.test(ua)) {
+    return { label: withBrowser('Smart TV'), type: 'tv', resolution };
+  }
+  if (/iPad/i.test(ua)) {
+    return { label: withBrowser('iPad'), type: 'mobile', resolution };
+  }
+  if (/iPhone|iPod/i.test(ua)) {
+    return { label: withBrowser('iPhone'), type: 'mobile', resolution };
+  }
+  if (/Android/i.test(ua)) {
+    return { label: withBrowser('Celular Android'), type: 'mobile', resolution };
+  }
+  if (/Macintosh/i.test(ua)) {
+    return { label: withBrowser('Computador Mac'), type: 'desktop', resolution };
+  }
+  if (/Windows/i.test(ua)) {
+    return { label: withBrowser('Computador Windows'), type: 'desktop', resolution };
+  }
+  if (/Linux/i.test(ua)) {
+    return { label: withBrowser('Computador Linux'), type: 'desktop', resolution };
+  }
+  return { label: withBrowser('Tela Web'), type: 'desktop', resolution };
 }
 
 function generateRoomCode(): string {
@@ -82,15 +127,24 @@ export const StageInstanceProvider = StageInstanceContext.Provider;
 export const useStageInstance = () => useContext(StageInstanceContext);
 
 export interface BroadcastContextValue {
+  myClientId: string;
   mode: BroadcastMode;
   roomId: string;
   connected: boolean;
   roomState: RoomSyncState;
+  networkDevices: NetworkDeviceInfo[];
   isBroadcastModalOpen: boolean;
   networkInfo: NetworkInfoResponse | null;
   openBroadcastModal: () => void;
   closeBroadcastModal: () => void;
-  startPresenting: (customRoomId?: string, initialPos?: { slideIndex: number; subStep: number }) => void;
+  startPresenting: (
+    customRoomId?: string,
+    initialPos?: { slideIndex: number; subStep: number }
+  ) => void;
+  castToDevices: (
+    targetClientIds: string[] | 'ALL',
+    initialPos?: { slideIndex: number; subStep: number }
+  ) => Promise<void>;
   joinAsScreen: (targetRoomId: string) => void;
   joinAsPresenter: (targetRoomId: string) => void;
   leaveBroadcast: () => void;
@@ -115,7 +169,6 @@ export interface BroadcastContextValue {
 const BroadcastContext = createContext<BroadcastContextValue | null>(null);
 
 export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  // Lê parâmetros iniciais de URL (?sala=4829&modo=tela | apresentador) para conexão via QR Code ou Link LAN
   const initialUrlParams = useMemo(() => {
     if (typeof window === 'undefined') {
       return { room: generateRoomCode(), mode: 'standalone' as BroadcastMode };
@@ -142,11 +195,13 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const [mode, setMode] = useState<BroadcastMode>(initialUrlParams.mode);
   const [roomId, setRoomId] = useState<string>(initialUrlParams.room);
   const [connected, setConnected] = useState<boolean>(false);
+  const [networkDevices, setNetworkDevices] = useState<NetworkDeviceInfo[]>([]);
   const [isBroadcastModalOpen, setIsBroadcastModalOpen] = useState<boolean>(false);
   const [networkInfo, setNetworkInfo] = useState<NetworkInfoResponse | null>(null);
 
   const [roomState, setRoomState] = useState<RoomSyncState>(() => ({
     roomId: initialUrlParams.room,
+    version: 0,
     slideIndex: 0,
     subStep: 0,
     blackout: false,
@@ -169,30 +224,154 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   }));
 
   const clientIdRef = useRef<string>(getOrCreateClientId());
-  const deviceLabelRef = useRef<string>(detectDeviceLabel());
+  const deviceProfileRef = useRef(detectDeviceProfile());
+  const modeRef = useRef<BroadcastMode>(mode);
+  const roomIdRef = useRef<string>(roomId);
+  const roomVersionRef = useRef<number>(0);
+  const devicesVersionRef = useRef<number>(0);
+  const pendingDiscreteActionsRef = useRef<number>(0);
+
   const wsRef = useRef<WebSocket | null>(null);
   const bcRef = useRef<BroadcastChannel | null>(null);
-  const pendingInitialPosRef = useRef<{ slideIndex: number; subStep: number } | null>(null);
-  const lastPointerSendRef = useRef<number>(0);
-  const lastStrokeSendRef = useRef<number>(0);
+
+  // Fila coalescida para eventos contínuos (Laser Pointer / Desenho) em HTTP
+  const continuousInFlightRef = useRef<boolean>(false);
+  const queuedContinuousActionRef = useRef<Record<string, unknown> | null>(null);
+
+  useEffect(() => {
+    modeRef.current = mode;
+  }, [mode]);
+
+  useEffect(() => {
+    roomIdRef.current = roomId;
+  }, [roomId]);
+
+  const applyRemoteCastCommand = useCallback((cmd: RemoteCastCommand) => {
+    if (!cmd || !cmd.roomId) return;
+    const cleanRoom = cmd.roomId.trim().toUpperCase();
+    const clamped = clampPosition(cmd.slideIndex ?? 0, cmd.subStep ?? 0);
+    roomIdRef.current = cleanRoom;
+    modeRef.current = cmd.targetMode;
+    roomVersionRef.current = 0;
+    setRoomId(cleanRoom);
+    setMode(cmd.targetMode);
+    setIsBroadcastModalOpen(false);
+    setRoomState((prev) => ({
+      ...prev,
+      roomId: cleanRoom,
+      slideIndex: clamped.slideIndex,
+      subStep: clamped.subStep,
+      pointer: null,
+    }));
+  }, []);
+
+  const applyRoomSnapshot = useCallback((st: Record<string, any>, forceOverride = false) => {
+    if (!st) return;
+    const incomingVersion = typeof st.version === 'number' ? st.version : 0;
+    const isPresenter = modeRef.current === 'presenter';
+
+    // Se somos o apresentador com cliques discretos em trânsito, atualiza apenas presença
+    if (isPresenter && pendingDiscreteActionsRef.current > 0 && !forceOverride) {
+      if (Array.isArray(st.presence)) {
+        setRoomState((prev) => ({ ...prev, presence: st.presence }));
+      }
+      return;
+    }
+
+    if (incomingVersion > 0) {
+      roomVersionRef.current = Math.max(roomVersionRef.current, incomingVersion);
+    }
+
+    const offset = typeof st.serverTime === 'number' ? st.serverTime - Date.now() : 0;
+    const clamped = clampPosition(
+      typeof st.slideIndex === 'number' ? st.slideIndex : 0,
+      typeof st.subStep === 'number' ? st.subStep : 0
+    );
+
+    setRoomState((prev) => ({
+      roomId: st.roomId || prev.roomId,
+      version: incomingVersion || prev.version,
+      slideIndex: clamped.slideIndex,
+      subStep: clamped.subStep,
+      blackout: Boolean(st.blackout),
+      spotlight: isPresenter && !forceOverride ? prev.spotlight : st.spotlight ?? null,
+      pointer: isPresenter && !forceOverride ? prev.pointer : st.pointer ?? null,
+      drawingsBySlide: st.drawingsBySlide || prev.drawingsBySlide,
+      slideCustomState: st.slideCustomState || prev.slideCustomState,
+      customNotes: { ...prev.customNotes, ...(st.customNotes || {}) },
+      timer: st.timer || prev.timer,
+      presence: Array.isArray(st.presence) ? st.presence : prev.presence,
+      serverTimeOffsetMs: offset,
+    }));
+  }, []);
+
+  const registerPresenceHttp = useCallback(
+    async (extra?: {
+      targetMode?: BroadcastMode;
+      targetRoomId?: string;
+      initialSlideIndex?: number;
+      initialSubStep?: number;
+    }) => {
+      try {
+        const effectiveMode = extra?.targetMode ?? modeRef.current;
+        const effectiveRoom = extra?.targetRoomId ?? roomIdRef.current;
+        const res = await fetch('/api/cast/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            clientId: clientIdRef.current,
+            deviceLabel: deviceProfileRef.current.label,
+            deviceType: deviceProfileRef.current.type,
+            screenResolution: deviceProfileRef.current.resolution,
+            mode: effectiveMode,
+            roomId: effectiveRoom,
+            initialSlideIndex: extra?.initialSlideIndex,
+            initialSubStep: extra?.initialSubStep,
+          }),
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        setConnected(true);
+        if (typeof data.devicesVersion === 'number') {
+          devicesVersionRef.current = data.devicesVersion;
+        }
+        if (Array.isArray(data.devices)) {
+          setNetworkDevices(
+            data.devices.filter((d: NetworkDeviceInfo) => d.clientId !== clientIdRef.current)
+          );
+        }
+        if (data.castCommand) {
+          applyRemoteCastCommand(data.castCommand as RemoteCastCommand);
+        } else if (data.roomState) {
+          applyRoomSnapshot(data.roomState, effectiveMode !== 'presenter');
+        }
+      } catch {
+        // Tentará novamente no ciclo de long-polling
+      }
+    },
+    [applyRemoteCastCommand, applyRoomSnapshot]
+  );
 
   const refreshNetworkInfo = useCallback(async () => {
     try {
-      const res = await fetch('/api/network-info');
-      if (res.ok) {
-        const data = (await res.json()) as NetworkInfoResponse;
+      const [netRes] = await Promise.all([
+        fetch('/api/network-info'),
+        registerPresenceHttp(),
+      ]);
+      if (netRes.ok) {
+        const data = (await netRes.json()) as NetworkInfoResponse;
         setNetworkInfo(data);
       }
     } catch {
-      // Fallback silencioso caso offline
+      // Fallback silencioso
     }
-  }, []);
+  }, [registerPresenceHttp]);
 
   useEffect(() => {
     refreshNetworkInfo();
   }, [refreshNetworkInfo]);
 
-  // Sincroniza URL limpa ao entrar/sair da transmissão para facilitar recarregamento sem perder a sala
+  // Atualiza URL com sala/modo preservando demais parâmetros
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const url = new URL(window.location.href);
@@ -208,184 +387,234 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     window.history.replaceState({}, '', url.toString());
   }, [mode, roomId]);
 
-  const sendWsMessage = useCallback((payload: Record<string, unknown>) => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify(payload));
-    }
-    if (bcRef.current) {
-      try {
-        bcRef.current.postMessage({
-          ...payload,
-          __senderId: clientIdRef.current,
-          __roomId: roomId,
-        });
-      } catch {
-        // Ignora caso canal fechado
+  // Processador idempotente para mensagens instantâneas vindas de WebSocket ou BroadcastChannel
+  const applyRealtimeEvent = useCallback(
+    (msg: Record<string, any>) => {
+      const type = String(msg.type || '');
+
+      if (type === 'cast:command' && msg.command) {
+        applyRemoteCastCommand(msg.command as RemoteCastCommand);
+        return;
       }
-    }
-  }, [roomId]);
 
-  // Processador idempotente de eventos recebidos do servidor WebSocket (ou BroadcastChannel local)
-  const applyIncomingEvent = useCallback((msg: Record<string, any>) => {
-    const type = msg.type as string;
+      if (typeof msg.version === 'number' && msg.version > roomVersionRef.current) {
+        roomVersionRef.current = msg.version;
+      }
 
-    if (type === 'room:init' && msg.state) {
-      const st = msg.state;
-      const offset = typeof st.serverTime === 'number' ? st.serverTime - Date.now() : 0;
-      setRoomState((prev) => ({
-        roomId: st.roomId || prev.roomId,
-        slideIndex: typeof st.slideIndex === 'number' ? st.slideIndex : 0,
-        subStep: typeof st.subStep === 'number' ? st.subStep : 0,
-        blackout: Boolean(st.blackout),
-        spotlight: st.spotlight ?? null,
-        pointer: st.pointer ?? null,
-        drawingsBySlide: st.drawingsBySlide || {},
-        slideCustomState: st.slideCustomState || prev.slideCustomState,
-        customNotes: { ...prev.customNotes, ...(st.customNotes || {}) },
-        timer: st.timer || prev.timer,
-        presence: Array.isArray(st.presence) ? st.presence : [],
-        serverTimeOffsetMs: offset,
-      }));
-      return;
-    }
+      if (type === 'room:init' && msg.state) {
+        applyRoomSnapshot(msg.state, modeRef.current !== 'presenter');
+        return;
+      }
 
-    if (type === 'room:presence' && Array.isArray(msg.presence)) {
-      setRoomState((prev) => ({ ...prev, presence: msg.presence }));
-      return;
-    }
+      if (type === 'room:presence' && Array.isArray(msg.presence)) {
+        setRoomState((prev) => ({ ...prev, presence: msg.presence }));
+        return;
+      }
 
-    if (type === 'nav:updated' || type === 'nav:goto') {
-      const pos = clampPosition(Number(msg.slideIndex) || 0, Number(msg.subStep) || 0);
-      setRoomState((prev) => ({
-        ...prev,
-        slideIndex: pos.slideIndex,
-        subStep: pos.subStep,
-        pointer: msg.pointer !== undefined ? msg.pointer : null,
-      }));
-      return;
-    }
+      if (type === 'nav:updated' || type === 'nav:goto') {
+        const pos = clampPosition(Number(msg.slideIndex) || 0, Number(msg.subStep) || 0);
+        setRoomState((prev) => ({
+          ...prev,
+          slideIndex: pos.slideIndex,
+          subStep: pos.subStep,
+          pointer: msg.pointer !== undefined ? msg.pointer : null,
+        }));
+        return;
+      }
 
-    if (type === 'stage:blackout') {
-      setRoomState((prev) => ({ ...prev, blackout: Boolean(msg.blackout) }));
-      return;
-    }
+      if (type === 'stage:blackout') {
+        setRoomState((prev) => ({ ...prev, blackout: Boolean(msg.blackout) }));
+        return;
+      }
 
-    if (type === 'stage:spotlight') {
-      setRoomState((prev) => ({ ...prev, spotlight: msg.spotlight ?? null }));
-      return;
-    }
+      if (type === 'stage:spotlight') {
+        setRoomState((prev) => ({ ...prev, spotlight: msg.spotlight ?? null }));
+        return;
+      }
 
-    if (type === 'pointer:updated' || type === 'pointer:move') {
-      const pointerPayload =
-        type === 'pointer:updated'
-          ? msg.pointer
-          : msg.active
-          ? {
-              active: true,
-              x: Number(msg.x) || 0,
-              y: Number(msg.y) || 0,
-              color: String(msg.color || '#dc143c'),
-              updatedAt: Date.now(),
-            }
-          : null;
-      setRoomState((prev) => ({ ...prev, pointer: pointerPayload }));
-      return;
-    }
+      if (type === 'pointer:updated' || type === 'pointer:move') {
+        const pointerPayload =
+          type === 'pointer:updated'
+            ? msg.pointer
+            : msg.active
+            ? {
+                active: true,
+                x: Number(msg.x) || 0,
+                y: Number(msg.y) || 0,
+                color: String(msg.color || '#dc143c'),
+                updatedAt: Date.now(),
+              }
+            : null;
+        setRoomState((prev) => ({ ...prev, pointer: pointerPayload }));
+        return;
+      }
 
-    if (type === 'draw:upserted' || type === 'draw:upsert') {
-      const sIdx = Number(msg.slideIndex) || 0;
-      const stroke = msg.stroke as DrawingStroke | undefined;
-      if (!stroke || !stroke.id) return;
-      setRoomState((prev) => {
-        const list = [...(prev.drawingsBySlide[sIdx] || [])];
-        const idx = list.findIndex((s) => s.id === stroke.id);
-        if (idx >= 0) {
-          list[idx] = stroke;
-        } else {
-          list.push(stroke);
-        }
-        return {
+      if (type === 'draw:upserted' || type === 'draw:upsert') {
+        const sIdx = Number(msg.slideIndex) || 0;
+        const stroke = msg.stroke as DrawingStroke | undefined;
+        if (!stroke || !stroke.id) return;
+        setRoomState((prev) => {
+          const list = [...(prev.drawingsBySlide[sIdx] || [])];
+          const idx = list.findIndex((s) => s.id === stroke.id);
+          if (idx >= 0) {
+            list[idx] = stroke;
+          } else {
+            list.push(stroke);
+          }
+          return {
+            ...prev,
+            drawingsBySlide: {
+              ...prev.drawingsBySlide,
+              [sIdx]: list,
+            },
+          };
+        });
+        return;
+      }
+
+      if (type === 'draw:synced') {
+        const sIdx = Number(msg.slideIndex) || 0;
+        setRoomState((prev) => ({
           ...prev,
           drawingsBySlide: {
             ...prev.drawingsBySlide,
-            [sIdx]: list,
-          },
-        };
-      });
-      return;
-    }
-
-    if (type === 'draw:synced') {
-      const sIdx = Number(msg.slideIndex) || 0;
-      setRoomState((prev) => ({
-        ...prev,
-        drawingsBySlide: {
-          ...prev.drawingsBySlide,
-          [sIdx]: Array.isArray(msg.strokes) ? msg.strokes : [],
-        },
-      }));
-      return;
-    }
-
-    if (type === 'slide:custom') {
-      const nextCustom = msg.slideCustomState || msg.patch;
-      if (nextCustom) {
-        setRoomState((prev) => ({
-          ...prev,
-          slideCustomState: {
-            ...prev.slideCustomState,
-            ...nextCustom,
+            [sIdx]: Array.isArray(msg.strokes) ? msg.strokes : [],
           },
         }));
+        return;
       }
-      return;
-    }
 
-    if (type === 'notes:updated' || type === 'notes:update') {
-      const key = String(msg.key || '');
-      if (!key) return;
-      const text = String(msg.text ?? '');
-      setRoomState((prev) => {
-        const merged = { ...prev.customNotes, [key]: text };
-        if (typeof window !== 'undefined') {
-          try {
-            window.localStorage.setItem(NOTES_STORAGE_KEY, JSON.stringify(merged));
-          } catch {
-            // Ignora quota
-          }
+      if (type === 'slide:custom') {
+        const nextCustom = msg.slideCustomState || msg.patch;
+        if (nextCustom) {
+          setRoomState((prev) => ({
+            ...prev,
+            slideCustomState: {
+              ...prev.slideCustomState,
+              ...nextCustom,
+            },
+          }));
         }
-        return { ...prev, customNotes: merged };
-      });
-      return;
-    }
-
-    if (type === 'timer:updated') {
-      if (msg.timer) {
-        const offset =
-          typeof msg.serverTime === 'number' ? msg.serverTime - Date.now() : undefined;
-        setRoomState((prev) => ({
-          ...prev,
-          timer: msg.timer,
-          serverTimeOffsetMs: offset ?? prev.serverTimeOffsetMs,
-        }));
+        return;
       }
-    }
-  }, []);
 
-  // Conexão WebSocket ativa sempre que a sala está aberta (em transmissão/recepção ou com o modal aberto para ver telas conectadas)
-  const shouldConnectSocket = mode !== 'standalone' || isBroadcastModalOpen;
+      if (type === 'notes:updated' || type === 'notes:update') {
+        const key = String(msg.key || '');
+        if (!key) return;
+        const text = String(msg.text ?? '');
+        setRoomState((prev) => {
+          const merged = { ...prev.customNotes, [key]: text };
+          if (typeof window !== 'undefined') {
+            try {
+              window.localStorage.setItem(NOTES_STORAGE_KEY, JSON.stringify(merged));
+            } catch {
+              // Ignora quota
+            }
+          }
+          return { ...prev, customNotes: merged };
+        });
+        return;
+      }
 
+      if (type === 'timer:updated') {
+        if (msg.timer) {
+          const offset =
+            typeof msg.serverTime === 'number' ? msg.serverTime - Date.now() : undefined;
+          setRoomState((prev) => ({
+            ...prev,
+            timer: msg.timer,
+            serverTimeOffsetMs: offset ?? prev.serverTimeOffsetMs,
+          }));
+        }
+      }
+    },
+    [applyRemoteCastCommand, applyRoomSnapshot]
+  );
+
+  /**
+   * MOTOR 1 (GARANTIDO EM 100% DAS REDES E PROXIES):
+   * Loop contínuo de Long-Polling HTTP (/api/cast/poll) sempre ativo em qualquer tela aberta.
+   * Garante detecção instantânea de telas na rede e sincronização imediata mesmo quando WebSockets são bloqueados.
+   */
   useEffect(() => {
-    if (typeof window === 'undefined' || !shouldConnectSocket || !roomId) {
-      setConnected(false);
-      return;
-    }
+    if (typeof window === 'undefined') return;
 
     let cancelled = false;
-    let reconnectTimer: number | null = null;
-    let attempt = 0;
+    let activeAbort: AbortController | null = null;
 
-    // Canal local paralelo para sincronia instantânea entre abas do mesmo dispositivo
+    const runPollLoop = async () => {
+      await registerPresenceHttp();
+
+      while (!cancelled) {
+        activeAbort = new AbortController();
+        try {
+          const query = new URLSearchParams({
+            clientId: clientIdRef.current,
+            roomId: roomIdRef.current,
+            mode: modeRef.current,
+            sinceRoomVersion: String(roomVersionRef.current),
+            sinceDevicesVersion: String(devicesVersionRef.current),
+          });
+
+          const res = await fetch(`/api/cast/poll?${query.toString()}`, {
+            method: 'GET',
+            cache: 'no-store',
+            signal: activeAbort.signal,
+          });
+
+          if (!res.ok) {
+            throw new Error(`HTTP ${res.status}`);
+          }
+
+          const data = await res.json();
+          if (cancelled) break;
+
+          setConnected(true);
+
+          if (typeof data.devicesVersion === 'number') {
+            devicesVersionRef.current = data.devicesVersion;
+          }
+          if (Array.isArray(data.devices)) {
+            setNetworkDevices(
+              data.devices.filter((d: NetworkDeviceInfo) => d.clientId !== clientIdRef.current)
+            );
+          }
+
+          if (data.castCommand) {
+            applyRemoteCastCommand(data.castCommand as RemoteCastCommand);
+            continue;
+          }
+
+          if (data.roomState) {
+            applyRoomSnapshot(data.roomState, false);
+          }
+        } catch (err: any) {
+          if (cancelled || err?.name === 'AbortError') {
+            break;
+          }
+          setConnected(false);
+          await new Promise((r) => window.setTimeout(r, 900));
+        }
+      }
+    };
+
+    runPollLoop();
+
+    return () => {
+      cancelled = true;
+      activeAbort?.abort();
+    };
+  }, [mode, roomId, registerPresenceHttp, applyRemoteCastCommand, applyRoomSnapshot]);
+
+  /**
+   * MOTOR 2 (ACELERADOR LAN LOCAL + MULTI-ABAS):
+   * BroadcastChannel para abas locais + WebSocket oportunista em LAN direta (falha silenciosa caso proxy bloqueie WS).
+   */
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    let cancelled = false;
+
     if ('BroadcastChannel' in window) {
       const bc = new BroadcastChannel('missao-nepal-lan-bc');
       bc.onmessage = (ev) => {
@@ -395,73 +624,62 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           data.__roomId === roomId &&
           data.__senderId !== clientIdRef.current
         ) {
-          applyIncomingEvent(data);
+          applyRealtimeEvent(data);
         }
       };
       bcRef.current = bc;
     }
 
-    const connect = () => {
-      if (cancelled) return;
-      const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${proto}//${window.location.host}/ws-cast`;
-      const socket = new WebSocket(wsUrl);
-      wsRef.current = socket;
+    // Tenta WebSocket apenas quando fora de domínios Cloud Run proxy que desativam WS, ou tenta 1x sem floodar erros
+    const isAiStudioProxy = /\.run\.app$/i.test(window.location.hostname);
+    if (!isAiStudioProxy) {
+      try {
+        const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const socket = new WebSocket(`${proto}//${window.location.host}/ws-cast`);
+        wsRef.current = socket;
 
-      socket.onopen = () => {
-        if (cancelled) {
+        socket.onopen = () => {
+          if (cancelled) {
+            socket.close();
+            return;
+          }
+          setConnected(true);
+          socket.send(
+            JSON.stringify({
+              type: 'room:join',
+              roomId,
+              clientId: clientIdRef.current,
+              role: mode,
+              deviceLabel: deviceProfileRef.current.label,
+              deviceType: deviceProfileRef.current.type,
+              screenResolution: deviceProfileRef.current.resolution,
+            })
+          );
+        };
+
+        socket.onmessage = (event) => {
+          try {
+            const parsed = JSON.parse(String(event.data));
+            applyRealtimeEvent(parsed);
+          } catch {
+            // Ignora
+          }
+        };
+
+        socket.onclose = () => {
+          if (wsRef.current === socket) wsRef.current = null;
+        };
+
+        socket.onerror = () => {
           socket.close();
-          return;
-        }
-        attempt = 0;
-        setConnected(true);
-        const initPos = pendingInitialPosRef.current;
-        socket.send(
-          JSON.stringify({
-            type: 'room:join',
-            roomId,
-            clientId: clientIdRef.current,
-            role: mode === 'presenter' ? 'presenter' : 'screen',
-            deviceLabel: deviceLabelRef.current,
-            initialSlideIndex: initPos?.slideIndex,
-            initialSubStep: initPos?.subStep,
-          })
-        );
-        pendingInitialPosRef.current = null;
-      };
-
-      socket.onmessage = (event) => {
-        try {
-          const parsed = JSON.parse(String(event.data));
-          applyIncomingEvent(parsed);
-        } catch {
-          // Ignora pacotes malformados
-        }
-      };
-
-      socket.onclose = () => {
-        if (wsRef.current === socket) {
-          wsRef.current = null;
-        }
-        setConnected(false);
-        if (!cancelled) {
-          const delay = Math.min(4000, 700 * Math.pow(1.6, attempt++));
-          reconnectTimer = window.setTimeout(connect, delay);
-        }
-      };
-
-      socket.onerror = () => {
-        socket.close();
-      };
-    };
-
-    connect();
+        };
+      } catch {
+        // HTTP Long-Polling assume integralmente
+      }
+    }
 
     return () => {
       cancelled = true;
-      if (reconnectTimer !== null) {
-        window.clearTimeout(reconnectTimer);
-      }
       if (wsRef.current) {
         wsRef.current.close();
         wsRef.current = null;
@@ -471,7 +689,113 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         bcRef.current = null;
       }
     };
-  }, [shouldConnectSocket, roomId, mode, applyIncomingEvent]);
+  }, [roomId, mode, applyRealtimeEvent]);
+
+  // Envio garantido de ações discretas (Navegação, Cortina, Desfazer, Limpar, Notas, Cronômetro)
+  const sendDiscreteAction = useCallback((action: Record<string, unknown>) => {
+    const activeRoom = roomIdRef.current;
+
+    if (bcRef.current) {
+      try {
+        bcRef.current.postMessage({
+          ...action,
+          __senderId: clientIdRef.current,
+          __roomId: activeRoom,
+        });
+      } catch {
+        // Ignora
+      }
+    }
+
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify(action));
+    }
+
+    pendingDiscreteActionsRef.current += 1;
+    fetch('/api/cast/action', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      keepalive: true,
+      body: JSON.stringify({
+        roomId: activeRoom,
+        clientId: clientIdRef.current,
+        action,
+      }),
+    })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data && typeof data.version === 'number') {
+          roomVersionRef.current = Math.max(roomVersionRef.current, data.version);
+          setConnected(true);
+        }
+      })
+      .catch(() => {
+        // Reconciliado no próximo poll
+      })
+      .finally(() => {
+        pendingDiscreteActionsRef.current = Math.max(
+          0,
+          pendingDiscreteActionsRef.current - 1
+        );
+      });
+  }, []);
+
+  // Envio coalescido de eventos contínuos (Laser Pointer, Spotlight, Traço de Desenho) sem empilhar requisições HTTP
+  const flushContinuousQueue = useCallback(async () => {
+    if (continuousInFlightRef.current) return;
+    continuousInFlightRef.current = true;
+
+    while (queuedContinuousActionRef.current) {
+      const nextAction = queuedContinuousActionRef.current;
+      queuedContinuousActionRef.current = null;
+      try {
+        const res = await fetch('/api/cast/action', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            roomId: roomIdRef.current,
+            clientId: clientIdRef.current,
+            action: nextAction,
+          }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data && typeof data.version === 'number') {
+            roomVersionRef.current = Math.max(roomVersionRef.current, data.version);
+          }
+        }
+      } catch {
+        // Ignora falha transitória de frame intermediário
+      }
+    }
+
+    continuousInFlightRef.current = false;
+  }, []);
+
+  const sendContinuousAction = useCallback(
+    (action: Record<string, unknown>) => {
+      const activeRoom = roomIdRef.current;
+      if (bcRef.current) {
+        try {
+          bcRef.current.postMessage({
+            ...action,
+            __senderId: clientIdRef.current,
+            __roomId: activeRoom,
+          });
+        } catch {
+          // Ignora
+        }
+      }
+
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify(action));
+      }
+
+      queuedContinuousActionRef.current = action;
+      flushContinuousQueue();
+    },
+    [flushContinuousQueue]
+  );
 
   const openBroadcastModal = useCallback(() => {
     refreshNetworkInfo();
@@ -484,43 +808,134 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   const startPresenting = useCallback(
     (customRoomId?: string, initialPos?: { slideIndex: number; subStep: number }) => {
-      const targetRoom = (customRoomId || roomId || generateRoomCode()).trim().toUpperCase();
-      if (initialPos) {
-        pendingInitialPosRef.current = clampPosition(initialPos.slideIndex, initialPos.subStep);
-        setRoomState((prev) => ({
-          ...prev,
-          roomId: targetRoom,
-          slideIndex: initialPos.slideIndex,
-          subStep: initialPos.subStep,
-        }));
-      }
+      const targetRoom = (customRoomId || roomIdRef.current || generateRoomCode())
+        .trim()
+        .toUpperCase();
+      const clamped = initialPos
+        ? clampPosition(initialPos.slideIndex, initialPos.subStep)
+        : undefined;
+
+      roomIdRef.current = targetRoom;
+      modeRef.current = 'presenter';
       setRoomId(targetRoom);
       setMode('presenter');
       setIsBroadcastModalOpen(false);
+
+      if (clamped) {
+        setRoomState((prev) => ({
+          ...prev,
+          roomId: targetRoom,
+          slideIndex: clamped.slideIndex,
+          subStep: clamped.subStep,
+          pointer: null,
+        }));
+      }
+
+      registerPresenceHttp({
+        targetMode: 'presenter',
+        targetRoomId: targetRoom,
+        initialSlideIndex: clamped?.slideIndex,
+        initialSubStep: clamped?.subStep,
+      });
     },
-    [roomId]
+    [registerPresenceHttp]
   );
 
-  const joinAsScreen = useCallback((targetRoomId: string) => {
-    const clean = targetRoomId.trim().toUpperCase();
-    if (!clean) return;
-    setRoomId(clean);
-    setMode('screen');
-    setIsBroadcastModalOpen(false);
-  }, []);
+  /**
+   * Transmite diretamente para 1 ou todas as telas detectadas na rede com um único clique!
+   */
+  const castToDevices = useCallback(
+    async (
+      targetClientIds: string[] | 'ALL',
+      initialPos?: { slideIndex: number; subStep: number }
+    ) => {
+      const targetRoom = (roomIdRef.current || generateRoomCode()).trim().toUpperCase();
+      const clamped = clampPosition(
+        initialPos?.slideIndex ?? roomState.slideIndex,
+        initialPos?.subStep ?? roomState.subStep
+      );
 
-  const joinAsPresenter = useCallback((targetRoomId: string) => {
-    const clean = targetRoomId.trim().toUpperCase();
-    if (!clean) return;
-    setRoomId(clean);
-    setMode('presenter');
-    setIsBroadcastModalOpen(false);
-  }, []);
+      roomIdRef.current = targetRoom;
+      modeRef.current = 'presenter';
+      setRoomId(targetRoom);
+      setMode('presenter');
+      setIsBroadcastModalOpen(false);
+      setRoomState((prev) => ({
+        ...prev,
+        roomId: targetRoom,
+        slideIndex: clamped.slideIndex,
+        subStep: clamped.subStep,
+        pointer: null,
+      }));
+
+      try {
+        const res = await fetch('/api/cast/summon', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            presenterClientId: clientIdRef.current,
+            presenterLabel: deviceProfileRef.current.label,
+            roomId: targetRoom,
+            targetClientIds,
+            slideIndex: clamped.slideIndex,
+            subStep: clamped.subStep,
+          }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          setConnected(true);
+          if (data.roomState) {
+            applyRoomSnapshot(data.roomState, false);
+          }
+          if (Array.isArray(data.devices)) {
+            setNetworkDevices(
+              data.devices.filter((d: NetworkDeviceInfo) => d.clientId !== clientIdRef.current)
+            );
+          }
+        }
+      } catch {
+        // Reconciliado no próximo poll
+      }
+    },
+    [roomState.slideIndex, roomState.subStep, applyRoomSnapshot]
+  );
+
+  const joinAsScreen = useCallback(
+    (targetRoomId: string) => {
+      const clean = targetRoomId.trim().toUpperCase();
+      if (!clean) return;
+      roomIdRef.current = clean;
+      modeRef.current = 'screen';
+      roomVersionRef.current = 0;
+      setRoomId(clean);
+      setMode('screen');
+      setIsBroadcastModalOpen(false);
+      registerPresenceHttp({ targetMode: 'screen', targetRoomId: clean });
+    },
+    [registerPresenceHttp]
+  );
+
+  const joinAsPresenter = useCallback(
+    (targetRoomId: string) => {
+      const clean = targetRoomId.trim().toUpperCase();
+      if (!clean) return;
+      roomIdRef.current = clean;
+      modeRef.current = 'presenter';
+      roomVersionRef.current = 0;
+      setRoomId(clean);
+      setMode('presenter');
+      setIsBroadcastModalOpen(false);
+      registerPresenceHttp({ targetMode: 'presenter', targetRoomId: clean });
+    },
+    [registerPresenceHttp]
+  );
 
   const leaveBroadcast = useCallback(() => {
+    modeRef.current = 'standalone';
     setMode('standalone');
     setIsBroadcastModalOpen(false);
-  }, []);
+    registerPresenceHttp({ targetMode: 'standalone', targetRoomId: roomIdRef.current });
+  }, [registerPresenceHttp]);
 
   const goToPosition = useCallback(
     (slideIndex: number, subStep: number) => {
@@ -531,14 +946,14 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         subStep: pos.subStep,
         pointer: null,
       }));
-      sendWsMessage({
+      sendDiscreteAction({
         type: 'nav:goto',
         slideIndex: pos.slideIndex,
         subStep: pos.subStep,
         clearPointer: true,
       });
     },
-    [sendWsMessage]
+    [sendDiscreteAction]
   );
 
   const stepForwardBroadcast = useCallback(() => {
@@ -570,21 +985,22 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const setBlackout = useCallback(
     (blackout: boolean) => {
       setRoomState((prev) => ({ ...prev, blackout }));
-      sendWsMessage({ type: 'stage:blackout', blackout });
+      sendDiscreteAction({ type: 'stage:blackout', blackout });
     },
-    [sendWsMessage]
+    [sendDiscreteAction]
   );
 
   const setSpotlight = useCallback(
     (spotlight: SpotlightState | null) => {
       setRoomState((prev) => ({ ...prev, spotlight }));
-      const now = performance.now();
-      if (!spotlight || now - lastPointerSendRef.current >= 28) {
-        lastPointerSendRef.current = now;
-        sendWsMessage({ type: 'stage:spotlight', spotlight });
+      if (!spotlight) {
+        queuedContinuousActionRef.current = null;
+        sendDiscreteAction({ type: 'stage:spotlight', spotlight: null });
+      } else {
+        sendContinuousAction({ type: 'stage:spotlight', spotlight });
       }
     },
-    [sendWsMessage]
+    [sendDiscreteAction, sendContinuousAction]
   );
 
   const emitPointer = useCallback(
@@ -594,23 +1010,26 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         : null;
       setRoomState((prev) => ({ ...prev, pointer: pointerObj }));
 
-      const now = performance.now();
-      if (!active || now - lastPointerSendRef.current >= 26) {
-        lastPointerSendRef.current = now;
-        sendWsMessage({
-          type: 'pointer:move',
-          active,
-          x: Math.round(x * 10) / 10,
-          y: Math.round(y * 10) / 10,
-          color,
-        });
+      const payload = {
+        type: 'pointer:move',
+        active,
+        x: Math.round(x * 10) / 10,
+        y: Math.round(y * 10) / 10,
+        color,
+      };
+
+      if (!active) {
+        queuedContinuousActionRef.current = null;
+        sendDiscreteAction(payload);
+      } else {
+        sendContinuousAction(payload);
       }
     },
-    [sendWsMessage]
+    [sendDiscreteAction, sendContinuousAction]
   );
 
   const upsertStroke = useCallback(
-    (slideIndex: number, stroke: DrawingStroke, forceImmediate = false) => {
+    (slideIndex: number, stroke: DrawingStroke) => {
       setRoomState((prev) => {
         const list = [...(prev.drawingsBySlide[slideIndex] || [])];
         const idx = list.findIndex((s) => s.id === stroke.id);
@@ -628,17 +1047,13 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         };
       });
 
-      const now = performance.now();
-      if (forceImmediate || stroke.points.length <= 2 || now - lastStrokeSendRef.current >= 32) {
-        lastStrokeSendRef.current = now;
-        sendWsMessage({
-          type: 'draw:upsert',
-          slideIndex,
-          stroke,
-        });
-      }
+      sendContinuousAction({
+        type: 'draw:upsert',
+        slideIndex,
+        stroke,
+      });
     },
-    [sendWsMessage]
+    [sendContinuousAction]
   );
 
   const undoStroke = useCallback(
@@ -654,9 +1069,9 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           },
         };
       });
-      sendWsMessage({ type: 'draw:undo', slideIndex });
+      sendDiscreteAction({ type: 'draw:undo', slideIndex });
     },
-    [sendWsMessage]
+    [sendDiscreteAction]
   );
 
   const clearStrokes = useCallback(
@@ -668,9 +1083,9 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           [slideIndex]: [],
         },
       }));
-      sendWsMessage({ type: 'draw:clear', slideIndex });
+      sendDiscreteAction({ type: 'draw:clear', slideIndex });
     },
-    [sendWsMessage]
+    [sendDiscreteAction]
   );
 
   const updateSlideCustomState = useCallback(
@@ -682,9 +1097,9 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           ...patch,
         },
       }));
-      sendWsMessage({ type: 'slide:custom', patch });
+      sendDiscreteAction({ type: 'slide:custom', patch });
     },
-    [sendWsMessage]
+    [sendDiscreteAction]
   );
 
   const getNoteForStep = useCallback(
@@ -713,9 +1128,9 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         }
         return { ...prev, customNotes: merged };
       });
-      sendWsMessage({ type: 'notes:update', key, text });
+      sendDiscreteAction({ type: 'notes:update', key, text });
     },
-    [sendWsMessage]
+    [sendDiscreteAction]
   );
 
   const timerAction = useCallback(
@@ -747,21 +1162,24 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         }
         return prev;
       });
-      sendWsMessage({ type: 'timer:action', action });
+      sendDiscreteAction({ type: 'timer:action', action });
     },
-    [sendWsMessage]
+    [sendDiscreteAction]
   );
 
   const value: BroadcastContextValue = {
+    myClientId: clientIdRef.current,
     mode,
     roomId,
     connected,
     roomState,
+    networkDevices,
     isBroadcastModalOpen,
     networkInfo,
     openBroadcastModal,
     closeBroadcastModal,
     startPresenting,
+    castToDevices,
     joinAsScreen,
     joinAsPresenter,
     leaveBroadcast,
@@ -773,7 +1191,7 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     setBlackout,
     setSpotlight,
     emitPointer,
-    upsertStroke: (sIdx, st) => upsertStroke(sIdx, st, true),
+    upsertStroke,
     undoStroke,
     clearStrokes,
     updateSlideCustomState,

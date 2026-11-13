@@ -49,6 +49,8 @@ export interface TimerState {
   startedAt: number | null;
 }
 
+export type BroadcastMode = 'standalone' | 'presenter' | 'screen';
+
 export interface ClientPresence {
   clientId: string;
   role: 'presenter' | 'screen';
@@ -56,8 +58,31 @@ export interface ClientPresence {
   connectedAt: number;
 }
 
+export interface NetworkDeviceInfo {
+  clientId: string;
+  deviceLabel: string;
+  deviceType: 'desktop' | 'mobile' | 'tv';
+  screenResolution: string;
+  mode: BroadcastMode;
+  roomId: string;
+  slideIndex: number;
+  sameNetwork: boolean;
+  lastSeenAt: number;
+}
+
+export interface RemoteCastCommand {
+  id: string;
+  roomId: string;
+  targetMode: 'screen' | 'presenter';
+  slideIndex: number;
+  subStep: number;
+  fromDeviceLabel: string;
+  createdAt: number;
+}
+
 export interface RoomSyncState {
   roomId: string;
+  version: number;
   slideIndex: number;
   subStep: number;
   blackout: boolean;
@@ -71,12 +96,11 @@ export interface RoomSyncState {
   serverTimeOffsetMs: number;
 }
 
-export type BroadcastMode = 'standalone' | 'presenter' | 'screen';
-
 export interface NetworkInfoResponse {
   port: number;
   lanIps: string[];
   lanUrls: string[];
   originUrl: string;
+  sharedAppUrl: string | null;
   activeRoomsCount: number;
 }

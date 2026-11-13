@@ -70,7 +70,9 @@ export const PresenterConsole: React.FC = () => {
     roomId,
     connected,
     roomState,
+    networkDevices,
     openBroadcastModal,
+    castToDevices,
     leaveBroadcast,
     goToPosition,
     stepForwardBroadcast,
@@ -204,12 +206,27 @@ export const PresenterConsole: React.FC = () => {
             <span className="hidden sm:inline text-slate-400">·</span>
             <span
               className={`font-sans text-xs font-semibold whitespace-nowrap tabular-nums ${
-                connected ? 'text-emerald-400' : 'text-amber-400'
+                screensCount > 0 ? 'text-emerald-400' : 'text-amber-400'
               }`}
             >
               {screensCount} {screensCount === 1 ? 'telão' : 'telões'}
             </span>
           </button>
+
+          {screensCount === 0 &&
+            networkDevices.some((d) => d.mode !== 'presenter') && (
+              <button
+                type="button"
+                onClick={() => castToDevices('ALL', { slideIndex, subStep })}
+                className="min-h-[40px] px-3 py-1.5 rounded-xl bg-[#dc143c] hover:bg-[#b81032] text-white font-sans text-xs font-extrabold flex items-center gap-1.5 shadow-md transition-colors cursor-pointer shrink-0 animate-pulse"
+                title="Transmitir imediatamente para as telas abertas detectadas na rede"
+              >
+                <span>
+                  Conectar{' '}
+                  {networkDevices.filter((d) => d.mode !== 'presenter').length} Tela(s)
+                </span>
+              </button>
+            )}
 
           <span className="hidden xl:inline font-display text-xs font-extrabold uppercase tracking-widest text-slate-400 truncate">
             Console do Apresentador · Missão Nepal
