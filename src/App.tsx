@@ -6,8 +6,23 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Deck, Slide, DeckContext } from 'spectacle';
 import { LayoutGroup, AnimatePresence } from 'framer-motion';
+import { Cast, Wifi } from 'lucide-react';
 import { Slide01CoverContent } from './Slide01Cover';
 import { Slide02GeographyContent } from './Slide02Geography';
+import { Slide02AEconomyHDIContent } from './Slide02AEconomyHDI';
+import { Slide02BLanguagesCastesContent } from './Slide02BLanguagesCastes';
+import { Slide02CDailyCustomsContent } from './Slide02CDailyCustoms';
+import { Slide02DStreetsMobilityContent } from './Slide02DStreetsMobility';
+import { Slide02ERitualsFestivalsContent } from './Slide02ERitualsFestivals';
+import { Slide03TimelineContent } from './Slide03Timeline';
+import {
+  BroadcastProvider,
+  useBroadcast,
+  StageInstanceProvider,
+} from './broadcast/BroadcastContext';
+import { BroadcastModal } from './broadcast/BroadcastModal';
+import { PresenterConsole } from './broadcast/PresenterConsole';
+import { LiveAnnotationOverlay } from './broadcast/LiveAnnotationOverlay';
 
 /**
  * Tema base do Spectacle alinhado ao Design System "Missão Nepal" + Liquid Glass
@@ -110,66 +125,164 @@ function useStage16x9Size() {
 }
 
 /**
- * Controles em Liquid Glass integrados ao palco 1920x1080 + Atalho de Tela Cheia (4K / Projetor)
+ * Controles em Liquid Glass + Ponte de Sincronização do Spectacle com o Broadcast LAN:
+ * - No modo 'screen' (Telão receptor), sincroniza automaticamente o slide ativo com a sala.
+ * - Mantém um botão rápido "Transmitir" acessível para iniciar ou conectar dispositivos na rede LAN,
+ *   ocultando-se automaticamente quando em Tela Cheia ou no modo Telão Receptor para manter o palco limpo.
  */
 const DeckOverlayTemplate: React.FC<{
   isFullscreen: boolean;
   onToggleFullscreen: () => void;
-}> = ({ isFullscreen, onToggleFullscreen }) => {
-  const { activeView, slideCount, advanceSlide, regressSlide } = React.useContext(DeckContext);
-  const currentSlide = (activeView?.slideIndex ?? 0) + 1;
+  onDeckPositionChange: (slideIndex: number, subStep: number) => void;
+}> = ({ isFullscreen, onToggleFullscreen, onDeckPositionChange }) => {
+  const { activeView, slideCount, advanceSlide, regressSlide, skipTo } =
+    React.useContext(DeckContext);
+  const { mode, roomId, connected, roomState, openBroadcastModal } = useBroadcast();
+
+  const activeSlideIndex = activeView?.slideIndex ?? 0;
+  const activeStepIndex = activeView?.stepIndex ?? 0;
+  const currentSlide = activeSlideIndex + 1;
   const totalSlides = slideCount || 1;
+
+  // Reporta posição local do Deck para que ao abrir "Transmitir" a sala inicie no slide atual
+  useEffect(() => {
+    if (mode === 'standalone') {
+      const hasInternalSteps = activeSlideIndex === 1 || activeSlideIndex === 7;
+      const normalizedSubStep = hasInternalSteps
+        ? Math.max(0, (typeof activeStepIndex === 'number' ? activeStepIndex : -1) + 1)
+        : 0;
+      onDeckPositionChange(activeSlideIndex, normalizedSubStep);
+    }
+  }, [mode, activeSlideIndex, activeStepIndex, onDeckPositionChange]);
+
+  // Quando este dispositivo atua como Telão Receptor ('screen'), sincroniza o slide com o Apresentador
+  useEffect(() => {
+    if (mode !== 'screen' || typeof skipTo !== 'function') return;
+    if (activeSlideIndex !== roomState.slideIndex) {
+      skipTo({ slideIndex: roomState.slideIndex, stepIndex: 0 });
+    }
+  }, [mode, roomState.slideIndex, activeSlideIndex, skipTo]);
+
+  const hideFloatingCastPill = isFullscreen || mode === 'screen';
 
   return (
     <div
       onClick={(e) => e.stopPropagation()}
-      className="pointer-events-none absolute inset-0 z-50 flex flex-col justify-end p-7"
+      className="pointer-events-none absolute inset-0 z-50 flex flex-col justify-between"
     >
-      <div className="flex items-center justify-end gap-4 opacity-80 hover:opacity-100 transition-opacity duration-300">
-        <div className="pointer-events-auto flex items-center gap-2.5 rounded-full bg-white/60 backdrop-blur-md border border-white/80 px-5 py-2 shadow-lg">
-          {totalSlides > 1 && (
-            <>
-              <button
-                type="button"
-                onClick={() => regressSlide()}
-                className="px-2.5 py-1 text-[14px] font-bold uppercase tracking-wider text-[#0f0f0f] hover:text-[#dc143c] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                aria-label="Slide Anterior"
-              >
-                ← Slide Anterior
-              </button>
-              <span className="text-[#0f0f0f]/25" aria-hidden="true">|</span>
-              <button
-                type="button"
-                onClick={() => advanceSlide()}
-                className="px-2.5 py-1 text-[14px] font-bold uppercase tracking-wider text-[#003893] hover:text-[#dc143c] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                aria-label="Próximo Slide"
-              >
-                Próximo Slide →
-              </button>
-              <span className="text-[#0f0f0f]/25" aria-hidden="true">|</span>
-            </>
-          )}
+      {/* Canto superior direito: Acesso rápido "Transmitir" visível em modo janela/celular, oculto em Tela Cheia/Telão */}
+      <div className="w-full flex justify-end p-5">
+        <div className="pointer-events-auto group">
           <button
             type="button"
-            onClick={onToggleFullscreen}
-            className="px-2.5 py-1 text-[13px] font-bold uppercase tracking-wider text-[#08254c] hover:text-[#dc143c] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            title="Alternar Tela Cheia 4K (Atalho: Tecla F)"
+            onClick={openBroadcastModal}
+            title="Transmitir apresentação para outras telas na rede LAN ou abrir Console do Apresentador"
+            className={`flex items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-extrabold uppercase tracking-wider backdrop-blur-md border shadow-lg transition-all duration-300 cursor-pointer ${
+              mode === 'screen'
+                ? 'bg-[#0b101d]/80 border-emerald-400/40 text-white opacity-0 group-hover:opacity-100 focus:opacity-100'
+                : hideFloatingCastPill
+                ? 'bg-white/75 border-white/80 text-[#003893] opacity-0 group-hover:opacity-100 focus:opacity-100'
+                : 'bg-white/80 hover:bg-[#003893] border-[#003893]/20 text-[#003893] hover:text-white opacity-95 hover:opacity-100'
+            }`}
           >
-            {isFullscreen ? '⤫ Sair da Tela Cheia' : '⛶ Tela Cheia 4K'}
+            {mode === 'screen' ? (
+              <>
+                <span
+                  className={`w-2 h-2 rounded-full ${
+                    connected ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'
+                  }`}
+                />
+                <Wifi className="w-3.5 h-3.5 text-emerald-400" />
+                <span>Telão · Sala {roomId}</span>
+              </>
+            ) : (
+              <>
+                <Cast className="w-3.5 h-3.5 text-[#dc143c] group-hover:text-current transition-colors" />
+                <span>Transmitir</span>
+              </>
+            )}
           </button>
         </div>
+      </div>
 
-        <div className="text-2xl font-normal tracking-wider text-[#2f3136]/80 font-sans tabular-nums pr-2">
-          {String(currentSlide).padStart(2, '0')}
+      {/* Região específica de hover no canto inferior direito */}
+      <div className="w-full flex justify-end">
+        <div className="pointer-events-auto group p-7 pl-16 pt-12 flex items-center justify-end">
+          <div className="flex items-center gap-3.5 opacity-0 translate-y-2 group-hover:opacity-100 group-hover:translate-y-0 focus-within:opacity-100 focus-within:translate-y-0 transition-all duration-300 ease-out">
+            <div className="flex items-center gap-2 rounded-full bg-white/70 backdrop-blur-md border border-white/85 px-4 py-1.5 shadow-lg">
+              {totalSlides > 1 && mode !== 'screen' && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => regressSlide()}
+                    className="px-2.5 py-1 text-[13px] font-bold uppercase tracking-wider text-[#0f0f0f] hover:text-[#dc143c] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    aria-label="Slide Anterior"
+                  >
+                    ← Anterior
+                  </button>
+                  <span className="text-[#0f0f0f]/20" aria-hidden="true">|</span>
+                  <button
+                    type="button"
+                    onClick={() => advanceSlide()}
+                    className="px-2.5 py-1 text-[13px] font-bold uppercase tracking-wider text-[#003893] hover:text-[#dc143c] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    aria-label="Próximo Slide"
+                  >
+                    Próximo →
+                  </button>
+                  <span className="text-[#0f0f0f]/20" aria-hidden="true">|</span>
+                </>
+              )}
+
+              <button
+                type="button"
+                onClick={openBroadcastModal}
+                className="px-2.5 py-1 text-[12.5px] font-bold uppercase tracking-wider text-[#dc143c] hover:text-[#003893] transition-colors whitespace-nowrap shrink-0 cursor-pointer flex items-center gap-1.5"
+                title="Transmitir na rede LAN ou conectar dispositivo"
+              >
+                <Cast className="w-3.5 h-3.5" />
+                <span>{mode === 'screen' ? `Sala ${roomId}` : 'Transmitir'}</span>
+              </button>
+
+              <span className="text-[#0f0f0f]/20" aria-hidden="true">|</span>
+
+              <button
+                type="button"
+                onClick={onToggleFullscreen}
+                className="px-2.5 py-1 text-[12.5px] font-bold uppercase tracking-wider text-[#08254c] hover:text-[#dc143c] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                title="Alternar Tela Cheia 4K (Atalho: Tecla F)"
+              >
+                {isFullscreen ? '⤫ Sair' : '⛶ Tela Cheia'}
+              </button>
+            </div>
+
+            <div className="text-xl font-medium tracking-wider text-[#2f3136]/75 font-sans tabular-nums pr-1">
+              {String(currentSlide).padStart(2, '0')}{' '}
+              <span className="text-sm text-[#2f3136]/45">/ {String(totalSlides).padStart(2, '0')}</span>
+            </div>
+          </div>
         </div>
       </div>
     </div>
   );
 };
 
-export default function App() {
+function AppPresentationShell() {
   const { width, height, scale, isPortraitMobile } = useStage16x9Size();
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [deckPos, setDeckPos] = useState<{ slideIndex: number; subStep: number }>({
+    slideIndex: 0,
+    subStep: 0,
+  });
+
+  const { mode, roomState, openBroadcastModal } = useBroadcast();
+
+  const handleDeckPositionChange = useCallback((slideIndex: number, subStep: number) => {
+    setDeckPos((prev) =>
+      prev.slideIndex === slideIndex && prev.subStep === subStep
+        ? prev
+        : { slideIndex, subStep }
+    );
+  }, []);
 
   const toggleFullscreen = useCallback(() => {
     if (typeof document === 'undefined') return;
@@ -187,13 +300,10 @@ export default function App() {
       setIsFullscreen(Boolean(document.fullscreenElement));
     };
     const onKeyDown = (e: KeyboardEvent) => {
-      if (
-        (e.key === 'f' || e.key === 'F') &&
-        !e.ctrlKey &&
-        !e.metaKey &&
-        !e.altKey &&
-        !(e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement)
-      ) {
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+
+      if (e.key === 'f' || e.key === 'F') {
         e.preventDefault();
         toggleFullscreen();
       }
@@ -205,6 +315,21 @@ export default function App() {
       window.removeEventListener('keydown', onKeyDown);
     };
   }, [toggleFullscreen]);
+
+  // Se este dispositivo é o Transmissor / Controle Remoto, exibe o Console do Apresentador completo
+  if (mode === 'presenter') {
+    return (
+      <>
+        <PresenterConsole />
+        <BroadcastModal
+          currentDeckSlideIndex={roomState.slideIndex}
+          currentDeckSubStep={roomState.subStep}
+        />
+      </>
+    );
+  }
+
+  const activeReceiverStrokes = roomState.drawingsBySlide[roomState.slideIndex] || [];
 
   return (
     <main className="w-screen h-screen w-[100dvw] h-[100dvh] bg-[#0e0f12] flex flex-col items-center justify-center overflow-hidden select-none">
@@ -219,46 +344,122 @@ export default function App() {
           } as React.CSSProperties
         }
       >
-        <LayoutGroup id="missao-nepal-deck">
-          <AnimatePresence mode="sync">
-            <Deck
-              theme={nepalSpectacleTheme}
-              transition={canvaFlowSpectacleTransition}
-              template={
-                <DeckOverlayTemplate
-                  isFullscreen={isFullscreen}
-                  onToggleFullscreen={toggleFullscreen}
-                />
-              }
-            >
-              {/* SLIDE 01: CAPA (MISSÃO NEPAL & LIBERDADE RELIGIOSA) */}
-              <Slide backgroundColor="#f4f2eb" padding={0}>
-                <Slide01CoverContent />
-              </Slide>
+        <StageInstanceProvider
+          value={{
+            isPreview: false,
+            forcedSubStep: null,
+            disableSlideTapAdvance: mode === 'screen',
+          }}
+        >
+          <LayoutGroup id="missao-nepal-deck">
+            <AnimatePresence mode="sync">
+              <Deck
+                theme={nepalSpectacleTheme}
+                transition={canvaFlowSpectacleTransition}
+                template={
+                  <DeckOverlayTemplate
+                    isFullscreen={isFullscreen}
+                    onToggleFullscreen={toggleFullscreen}
+                    onDeckPositionChange={handleDeckPositionChange}
+                  />
+                }
+              >
+                {/* SLIDE 01: CAPA (MISSÃO NEPAL & LIBERDADE RELIGIOSA) */}
+                <Slide backgroundColor="#f4f2eb" padding={0}>
+                  <Slide01CoverContent />
+                </Slide>
 
-              {/* SLIDE 02: ASPECTOS GEOGRÁFICOS (ANIMAÇÃO CONTÍNUA 3D EM 4 ETAPAS) */}
-              <Slide backgroundColor="#f4f2eb" padding={0}>
-                <Slide02GeographyContent />
-              </Slide>
-            </Deck>
-          </AnimatePresence>
-        </LayoutGroup>
+                {/* SLIDE 02: ASPECTOS GEOGRÁFICOS (ANIMAÇÃO CONTÍNUA 3D EM 4 ETAPAS) */}
+                <Slide backgroundColor="#f4f2eb" padding={0}>
+                  <Slide02GeographyContent />
+                </Slide>
+
+                {/* SLIDE 03: ECONOMIA, PIB, PIB PER CAPITA & IDH (COMPARATIVO BRASIL E MUNDO) */}
+                <Slide backgroundColor="#f4f2eb" padding={0}>
+                  <Slide02AEconomyHDIContent />
+                </Slide>
+
+                {/* SLIDE 04: 124 LÍNGUAS FALADAS & O SISTEMA DE CASTAS */}
+                <Slide backgroundColor="#f4f2eb" padding={0}>
+                  <Slide02BLanguagesCastesContent />
+                </Slide>
+
+                {/* SLIDE 05: COSTUMES COTIDIANOS (GENTILEZA, MÃO ESQUERDA, SAPATOS, DAL BHAT & JUTHO) */}
+                <Slide backgroundColor="#f4f2eb" padding={0}>
+                  <Slide02CDailyCustomsContent />
+                </Slide>
+
+                {/* SLIDE 06: MÃO INGLESA, TRÂNSITO CAÓTICO & VACAS SAGRADAS */}
+                <Slide backgroundColor="#f4f2eb" padding={0}>
+                  <Slide02DStreetsMobilityContent />
+                </Slide>
+
+                {/* SLIDE 07: RITUAIS DE CREMAÇÃO PÚBLICA & GRANDES FESTIVAIS DE OUTONO (DASHAIN, TIHAR & CHHATH) */}
+                <Slide backgroundColor="#f4f2eb" padding={0}>
+                  <Slide02ERitualsFestivalsContent />
+                </Slide>
+
+                {/* SLIDE 08: LINHA DO TEMPO HISTÓRICA & AVANÇO DO CRISTIANISMO (8 ETAPAS + GRÁFICO) */}
+                <Slide backgroundColor="#f4f2eb" padding={0}>
+                  <Slide03TimelineContent />
+                </Slide>
+              </Deck>
+            </AnimatePresence>
+          </LayoutGroup>
+        </StageInstanceProvider>
+
+        {/* Camada vetorial em tempo real (Laser Pointer, Desenhos, Spotlight e Cortina Escura) no Telão Receptor */}
+        {mode === 'screen' && (
+          <LiveAnnotationOverlay
+            strokes={activeReceiverStrokes}
+            pointer={roomState.pointer}
+            spotlight={roomState.spotlight}
+            blackout={roomState.blackout}
+            variant="receiver"
+          />
+        )}
       </div>
 
-      {/* Dica discreta em celulares na vertical (Portrait) */}
+      {/* Barra rápida para celulares na vertical (Portrait) com atalho direto para Transmitir / Apresentador */}
       {isPortraitMobile && (
-        <div className="mt-3 px-4 py-2 rounded-full bg-white/10 border border-white/15 text-white/85 text-xs font-medium tracking-wide flex items-center gap-3">
-          <span>Toque no slide para avançar ou gire o celular para horizontal (16:9)</span>
-          <button
-            type="button"
-            onClick={toggleFullscreen}
-            className="px-2.5 py-1 rounded-full bg-[#003893] text-white font-bold uppercase text-[10px] tracking-wider"
-          >
-            Tela Cheia
-          </button>
+        <div className="mt-3 px-3.5 py-2 rounded-2xl bg-white/10 border border-white/15 text-white/85 text-xs font-medium tracking-wide flex flex-wrap items-center justify-center gap-2.5 max-w-[94vw]">
+          <span className="text-[11px] text-white/75">
+            Gire para 16:9 ou use seu celular como controle:
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={openBroadcastModal}
+              className="px-3 py-1.5 rounded-lg bg-[#dc143c] hover:bg-[#b81132] text-white font-bold uppercase text-[10px] tracking-wider flex items-center gap-1.5 shadow-md cursor-pointer"
+            >
+              <Cast className="w-3 h-3" />
+              <span>Transmitir</span>
+            </button>
+            <button
+              type="button"
+              onClick={toggleFullscreen}
+              className="px-2.5 py-1.5 rounded-lg bg-[#003893] text-white font-bold uppercase text-[10px] tracking-wider cursor-pointer"
+            >
+              Tela Cheia
+            </button>
+          </div>
         </div>
       )}
+
+      {/* Modal de Transmissão LAN, Pareamento QR Code e Código de 4 Dígitos */}
+      <BroadcastModal
+        currentDeckSlideIndex={deckPos.slideIndex}
+        currentDeckSubStep={deckPos.subStep}
+      />
     </main>
+  );
+}
+
+export default function App() {
+  return (
+    <BroadcastProvider>
+      <AppPresentationShell />
+    </BroadcastProvider>
   );
 }
 

@@ -9,6 +9,7 @@ import {
 } from './AnimationWrappers';
 import { GEO_PATHS } from './geoData';
 import { OfficialNepalFlag } from './OfficialNepalFlag';
+import { useOptionalBroadcast, useStageInstance } from './broadcast/BroadcastContext';
 
 export type GeoStage = 0 | 1 | 2 | 3;
 
@@ -325,6 +326,8 @@ const StaticWorldCartography = memo(() => {
 export const Slide02GeographyContent: React.FC = () => {
   const { step, placeholder } = useSteps(3);
   const [manualStage, setManualStage] = useState<GeoStage | null>(null);
+  const stageInstance = useStageInstance();
+  const broadcast = useOptionalBroadcast();
 
   useEffect(() => {
     setManualStage(null);
@@ -335,8 +338,18 @@ export const Slide02GeographyContent: React.FC = () => {
       ? Math.max(0, Math.min(3, Math.round(step + 1)))
       : 0;
   const clampedSpectacleStage = safeStepNumber as GeoStage;
+
+  const syncedSubStep =
+    stageInstance.forcedSubStep !== null
+      ? (Math.max(0, Math.min(3, stageInstance.forcedSubStep)) as GeoStage)
+      : broadcast && broadcast.mode !== 'standalone' && broadcast.roomState.slideIndex === 1
+      ? (Math.max(0, Math.min(3, broadcast.roomState.subStep)) as GeoStage)
+      : null;
+
   const activeStage: GeoStage =
-    manualStage !== null && VECTOR_CAMERA_POSES[manualStage]
+    syncedSubStep !== null
+      ? syncedSubStep
+      : manualStage !== null && VECTOR_CAMERA_POSES[manualStage]
       ? manualStage
       : clampedSpectacleStage;
 
@@ -1090,43 +1103,45 @@ export const Slide02GeographyContent: React.FC = () => {
           </CanvaFlowLayer>
 
           {/* ===================================================================
-              5. BARRA INTERATIVA DE ETAPAS NO RODAPÉ
+              5. BARRA INTERATIVA DE ETAPAS NO RODAPÉ (OCULTA POR PADRÃO, REVELA NO HOVER)
              =================================================================== */}
           <div
             onClick={(e) => e.stopPropagation()}
-            className="pointer-events-auto absolute left-[64px] bottom-[32px] z-40 flex items-center gap-3"
+            className="pointer-events-auto group absolute left-0 bottom-0 z-40 pt-10 pr-14 pl-[64px] pb-[28px]"
           >
-            {([0, 1, 2, 3] as GeoStage[]).map((stageIdx) => {
-              const isCurrent = activeStage === stageIdx;
-              const labels = [
-                '01. Índia & China',
-                '02. 6× no Mato Grosso',
-                '03. Bandeira no Mapa',
-                '04. Relevo 3D Himalaia',
-              ];
-              return (
-                <button
-                  key={stageIdx}
-                  type="button"
-                  onClick={() => setManualStage(stageIdx)}
-                  className={`px-4 py-2 rounded-full font-display text-[13px] font-bold uppercase tracking-wider transition-all duration-300 cursor-pointer whitespace-nowrap shrink-0 border ${
-                    isCurrent
-                      ? 'bg-[#003893] text-white border-[#003893] shadow-lg'
-                      : 'bg-white/30 text-[#08254c] border-white/70 hover:bg-white/55 backdrop-blur-md shadow-sm'
-                  }`}
-                >
-                  {labels[stageIdx]}
-                </button>
-              );
-            })}
+            <div className="flex items-center gap-3 opacity-0 translate-y-2 group-hover:opacity-100 group-hover:translate-y-0 focus-within:opacity-100 focus-within:translate-y-0 transition-all duration-300 ease-out">
+              {([0, 1, 2, 3] as GeoStage[]).map((stageIdx) => {
+                const isCurrent = activeStage === stageIdx;
+                const labels = [
+                  '01. Índia & China',
+                  '02. 6× no Mato Grosso',
+                  '03. Bandeira no Mapa',
+                  '04. Relevo 3D Himalaia',
+                ];
+                return (
+                  <button
+                    key={stageIdx}
+                    type="button"
+                    onClick={() => setManualStage(stageIdx)}
+                    className={`px-4 py-2 rounded-full font-display text-[13px] font-bold uppercase tracking-wider transition-all duration-300 cursor-pointer whitespace-nowrap shrink-0 border ${
+                      isCurrent
+                        ? 'bg-[#003893] text-white border-[#003893] shadow-lg'
+                        : 'bg-white/40 text-[#08254c] border-white/75 hover:bg-white/65 backdrop-blur-md shadow-sm'
+                    }`}
+                  >
+                    {labels[stageIdx]}
+                  </button>
+                );
+              })}
 
-            <button
-              type="button"
-              onClick={handleNextStageOrClick}
-              className="ml-2 px-5 py-2 rounded-full bg-[#dc143c] hover:bg-[#b81032] text-white font-display text-[13px] font-extrabold uppercase tracking-wider shadow-lg transition-all cursor-pointer whitespace-nowrap shrink-0"
-            >
-              {activeStage < 3 ? 'Avançar Clique ➔' : 'Reiniciar Ciclo ↻'}
-            </button>
+              <button
+                type="button"
+                onClick={handleNextStageOrClick}
+                className="ml-2 px-5 py-2 rounded-full bg-[#dc143c] hover:bg-[#b81032] text-white font-display text-[13px] font-extrabold uppercase tracking-wider shadow-lg transition-all cursor-pointer whitespace-nowrap shrink-0"
+              >
+                {activeStage < 3 ? 'Avançar Clique ➔' : 'Reiniciar Ciclo ↻'}
+              </button>
+            </div>
           </div>
         </div>
       </SlideStage>
