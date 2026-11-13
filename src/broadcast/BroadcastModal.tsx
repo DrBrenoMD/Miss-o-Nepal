@@ -15,33 +15,33 @@ import {
   RefreshCw,
   Radio,
 } from 'lucide-react';
-import { useBroadcast } from './BroadcastContext';
+import { useBroadcast, useBroadcastDiscovery } from './BroadcastContext';
 
 export interface BroadcastModalProps {
-  currentDeckSlideIndex?: number;
-  currentDeckSubStep?: number;
+  getDeckPosition?: () => { slideIndex: number; subStep: number };
 }
 
-export const BroadcastModal: React.FC<BroadcastModalProps> = ({
-  currentDeckSlideIndex = 0,
-  currentDeckSubStep = 0,
-}) => {
+export const BroadcastModal: React.FC<BroadcastModalProps> = React.memo(({ getDeckPosition }) => {
   const {
     mode,
     roomId,
-    connected,
     roomState,
-    networkDevices,
-    isBroadcastModalOpen,
-    networkInfo,
     closeBroadcastModal,
     startPresenting,
     castToDevices,
     joinAsScreen,
     joinAsPresenter,
     leaveBroadcast,
-    refreshNetworkInfo,
+    scanNetworkDevices,
   } = useBroadcast();
+
+  const {
+    connected,
+    isBroadcastModalOpen,
+    isScanningNetwork,
+    networkDevices,
+    presence,
+  } = useBroadcastDiscovery();
 
   const [activeTab, setActiveTab] = useState<'host' | 'join'>('host');
   const [qrTargetRole, setQrTargetRole] = useState<'screen' | 'presenter'>('screen');
@@ -49,9 +49,8 @@ export const BroadcastModal: React.FC<BroadcastModalProps> = ({
   const [joinCodeInput, setJoinCodeInput] = useState<string>('');
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
   const [copied, setCopied] = useState<boolean>(false);
-  const [isScanning, setIsScanning] = useState<boolean>(false);
 
-  // Lista inteligente de URLs base (prioriza URL Pública Compartilhada no AI Studio ou IP LAN local)
+  // Lista inteligente de URLs base (compatível com Vercel, domínio próprio, LAN e Google AI Studio ais-dev/ais-pre)
   const availableBaseUrls = useMemo(() => {
     const list: Array<{ label: string; url: string }> = [];
     const addUnique = (label: string, url: string | null | undefined) => {
@@ -68,24 +67,15 @@ export const BroadcastModal: React.FC<BroadcastModalProps> = ({
         currentOrigin.includes('localhost') || currentOrigin.includes('127.0.0.1');
       const isAiStudioDev = currentOrigin.startsWith('https://ais-dev-');
 
-      // Se estiver em ambiente ais-dev, prioriza ais-pre (URL pública acessível no celular/TV sem bloqueio de iframe)
-      if (networkInfo?.sharedAppUrl) {
-        addUnique('Link Compartilhável para Celular / TV', networkInfo.sharedAppUrl);
-      } else if (isAiStudioDev) {
+      if (isAiStudioDev) {
         addUnique(
-          'Link Compartilhável para Celular / TV',
+          'Link Público para Celular / Smart TV',
           currentOrigin.replace(/^https:\/\/ais-dev-/, 'https://ais-pre-')
         );
       }
 
-      if (networkInfo?.lanUrls && networkInfo.lanUrls.length > 0) {
-        networkInfo.lanUrls.forEach((lanUrl, idx) => {
-          addUnique(`Rede LAN Local (${networkInfo.lanIps[idx] || idx + 1})`, lanUrl);
-        });
-      }
-
       if (!isLocalhost && !isAiStudioDev) {
-        addUnique('Endereço de Rede Atual', currentOrigin);
+        addUnique('Endereço Web Atual', currentOrigin);
       } else {
         addUnique(
           isLocalhost ? 'Este Computador (Localhost)' : 'Sessão Local de Desenvolvimento',
@@ -95,7 +85,7 @@ export const BroadcastModal: React.FC<BroadcastModalProps> = ({
     }
 
     return list;
-  }, [networkInfo]);
+  }, []);
 
   useEffect(() => {
     if (availableBaseUrls.length > 0) {
@@ -138,15 +128,16 @@ export const BroadcastModal: React.FC<BroadcastModalProps> = ({
 
   if (!isBroadcastModalOpen) return null;
 
-  const screensCount = roomState.presence.filter((p) => p.role === 'screen').length;
-  const presentersCount = roomState.presence.filter((p) => p.role === 'presenter').length;
-  const castableDevices = networkDevices.filter((d) => d.mode !== 'presenter');
-
-  const handleManualRefresh = async () => {
-    setIsScanning(true);
-    await refreshNetworkInfo();
-    window.setTimeout(() => setIsScanning(false), 500);
+  const resolveCurrentPos = () => {
+    if (mode === 'standalone' && getDeckPosition) {
+      return getDeckPosition();
+    }
+    return { slideIndex: roomState.slideIndex, subStep: roomState.subStep };
   };
+
+  const screensCount = presence.filter((p) => p.role === 'screen').length;
+  const presentersCount = presence.filter((p) => p.role === 'presenter').length;
+  const castableDevices = networkDevices.filter((d) => d.mode !== 'presenter');
 
   const handleCopyLink = async () => {
     try {
@@ -154,7 +145,7 @@ export const BroadcastModal: React.FC<BroadcastModalProps> = ({
       setCopied(true);
       window.setTimeout(() => setCopied(false), 2000);
     } catch {
-      // Ignora se bloqueado pelo navegador
+      // Ignora caso bloqueado pelo navegador
     }
   };
 
@@ -175,10 +166,10 @@ export const BroadcastModal: React.FC<BroadcastModalProps> = ({
             </div>
             <div className="min-w-0">
               <h2 className="font-display text-base sm:text-lg font-extrabold tracking-tight truncate">
-                Transmissão Multi-Telas em Rede
+                Transmissão Multi-Telas P2P
               </h2>
               <p className="font-sans text-xs text-white/70 truncate">
-                Detecte telas abertas automaticamente ou pareie por QR Code / Código
+                Detecção automática por Wi-Fi ou pareamento instantâneo via QR Code / Sala
               </p>
             </div>
           </div>
@@ -205,7 +196,7 @@ export const BroadcastModal: React.FC<BroadcastModalProps> = ({
                   : 'text-stone-600 hover:text-[#080d1a]'
               }`}
             >
-              Telas na Rede & QR ({roomId})
+              Telas na Rede &amp; QR ({roomId})
             </button>
             <button
               type="button"
@@ -223,7 +214,7 @@ export const BroadcastModal: React.FC<BroadcastModalProps> = ({
           <div className="flex items-center gap-2 text-xs font-sans text-stone-600">
             <Wifi className={`w-4 h-4 ${connected ? 'text-emerald-600' : 'text-amber-600'}`} />
             <span className="font-semibold">
-              {connected ? 'Sincronização Ativa' : 'Conectando...'}
+              {connected ? 'Canal P2P Pronto' : 'Iniciando P2P...'}
             </span>
           </div>
         </div>
@@ -232,7 +223,7 @@ export const BroadcastModal: React.FC<BroadcastModalProps> = ({
           {activeTab === 'host' ? (
             <div className="p-5 sm:p-6 space-y-5">
               {/* ===============================================================
-                  RADAR DE DESCOBERTA AUTOMÁTICA DE TELAS NA REDE (ESTILO CAST)
+                  RADAR DE DESCOBERTA AUTOMÁTICA DE TELAS NA MESMA REDE WI-FI
                  =============================================================== */}
               <div className="rounded-2xl bg-white border border-stone-200 p-4 shadow-sm">
                 <div className="flex items-center justify-between gap-2 mb-3">
@@ -250,12 +241,7 @@ export const BroadcastModal: React.FC<BroadcastModalProps> = ({
                     {castableDevices.length > 1 && (
                       <button
                         type="button"
-                        onClick={() =>
-                          castToDevices('ALL', {
-                            slideIndex: currentDeckSlideIndex,
-                            subStep: currentDeckSubStep,
-                          })
-                        }
+                        onClick={() => castToDevices('ALL', resolveCurrentPos())}
                         className="px-3 py-1.5 rounded-lg bg-[#003893] hover:bg-[#002b70] text-white font-sans text-[11px] font-bold transition-colors cursor-pointer whitespace-nowrap"
                       >
                         Transmitir para Todas ({castableDevices.length})
@@ -263,11 +249,13 @@ export const BroadcastModal: React.FC<BroadcastModalProps> = ({
                     )}
                     <button
                       type="button"
-                      onClick={handleManualRefresh}
+                      onClick={() => scanNetworkDevices()}
                       className="px-2.5 py-1.5 rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-700 font-sans text-[11px] font-bold flex items-center gap-1 transition-colors cursor-pointer"
-                      title="Buscar telas abertas novamente"
+                      title="Buscar telas abertas na mesma rede Wi-Fi"
                     >
-                      <RefreshCw className={`w-3.5 h-3.5 ${isScanning ? 'animate-spin' : ''}`} />
+                      <RefreshCw
+                        className={`w-3.5 h-3.5 ${isScanningNetwork ? 'animate-spin' : ''}`}
+                      />
                       <span>Buscar</span>
                     </button>
                   </div>
@@ -315,12 +303,10 @@ export const BroadcastModal: React.FC<BroadcastModalProps> = ({
                                   <span className="text-emerald-700 font-bold">
                                     Recebendo ao vivo (Sala {dev.roomId})
                                   </span>
-                                ) : dev.sameNetwork ? (
-                                  <span className="text-[#003893] font-semibold">
-                                    Mesma Rede Wi-Fi / LAN
-                                  </span>
                                 ) : (
-                                  <span>Disponível para receber</span>
+                                  <span className="text-[#003893] font-semibold">
+                                    Mesma Rede Wi-Fi · Slide {String(dev.slideIndex + 1).padStart(2, '0')}
+                                  </span>
                                 )}
                               </div>
                             </div>
@@ -328,12 +314,7 @@ export const BroadcastModal: React.FC<BroadcastModalProps> = ({
 
                           <button
                             type="button"
-                            onClick={() =>
-                              castToDevices([dev.clientId], {
-                                slideIndex: currentDeckSlideIndex,
-                                subStep: currentDeckSubStep,
-                              })
-                            }
+                            onClick={() => castToDevices([dev.clientId], resolveCurrentPos())}
                             className={`px-3.5 py-2 rounded-xl font-sans text-xs font-extrabold flex items-center gap-1.5 shrink-0 transition-colors cursor-pointer ${
                               isAlreadySyncedHere
                                 ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
@@ -351,9 +332,15 @@ export const BroadcastModal: React.FC<BroadcastModalProps> = ({
                   <div className="rounded-xl bg-stone-50 border border-dashed border-stone-300 px-4 py-3 flex items-center gap-3 text-left">
                     <Radio className="w-5 h-5 text-stone-400 shrink-0" />
                     <p className="font-sans text-xs text-stone-600 leading-relaxed">
-                      Nenhuma outra tela aberta no momento. Basta abrir esta apresentação no{' '}
-                      <strong>computador, TV ou projetor</strong> para que ela apareça aqui
-                      automaticamente — ou escaneie o QR Code abaixo.
+                      {isScanningNetwork ? (
+                        <span>Procurando telas abertas na mesma rede Wi-Fi...</span>
+                      ) : (
+                        <>
+                          Nenhuma outra tela detectada ainda. Basta abrir a apresentação no{' '}
+                          <strong>computador, TV ou celular</strong> conectado ao mesmo Wi-Fi para
+                          que ela apareça aqui — ou use o QR Code / Código abaixo.
+                        </>
+                      )}
                     </p>
                   </div>
                 )}
@@ -405,7 +392,7 @@ export const BroadcastModal: React.FC<BroadcastModalProps> = ({
                   <p className="font-sans text-[11px] text-stone-600 mt-2 leading-snug">
                     {qrTargetRole === 'screen'
                       ? 'Escaneie na Smart TV / Projetor para abrir o Telão sincronizado'
-                      : 'Escaneie com o Celular: seu celular vira o controle e esta tela vira o Telão'}
+                      : 'Escaneie com o Celular: seu celular vira o controle e esta tela vira o Telão automaticamente'}
                   </p>
                 </div>
 
@@ -443,7 +430,7 @@ export const BroadcastModal: React.FC<BroadcastModalProps> = ({
                     </div>
                   </div>
 
-                  {/* Seletor de IP / Rede */}
+                  {/* Seletor de URL caso existam múltiplas origens */}
                   {availableBaseUrls.length > 1 && (
                     <div>
                       <label className="block font-sans text-xs font-bold text-stone-600 mb-1">
@@ -518,16 +505,11 @@ export const BroadcastModal: React.FC<BroadcastModalProps> = ({
                 <button
                   type="button"
                   onClick={() => {
+                    const pos = resolveCurrentPos();
                     if (castableDevices.length > 0 && mode === 'standalone') {
-                      castToDevices('ALL', {
-                        slideIndex: currentDeckSlideIndex,
-                        subStep: currentDeckSubStep,
-                      });
+                      castToDevices('ALL', pos);
                     } else {
-                      startPresenting(roomId, {
-                        slideIndex: currentDeckSlideIndex,
-                        subStep: currentDeckSubStep,
-                      });
+                      startPresenting(roomId, pos);
                     }
                   }}
                   className="px-5 py-3 rounded-xl bg-[#dc143c] hover:bg-[#b81032] text-white font-sans text-sm font-extrabold flex items-center justify-center gap-2 shadow-md transition-colors whitespace-nowrap cursor-pointer"
@@ -606,4 +588,4 @@ export const BroadcastModal: React.FC<BroadcastModalProps> = ({
       </div>
     </div>
   );
-};
+});

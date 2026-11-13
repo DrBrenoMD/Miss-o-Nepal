@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Deck, Slide, DeckContext } from 'spectacle';
 import { LayoutGroup, AnimatePresence } from 'framer-motion';
 import { Cast } from 'lucide-react';
@@ -18,6 +18,7 @@ import { Slide03TimelineContent } from './Slide03Timeline';
 import {
   BroadcastProvider,
   useBroadcast,
+  useBroadcastOverlay,
   StageInstanceProvider,
 } from './broadcast/BroadcastContext';
 import { BroadcastModal } from './broadcast/BroadcastModal';
@@ -27,8 +28,6 @@ import { LiveAnnotationOverlay } from './broadcast/LiveAnnotationOverlay';
 /**
  * Tema base do Spectacle alinhado ao Design System "Missão Nepal" + Liquid Glass
  * - Proporção nativa 16:9 (1920x1080) escalonada dinamicamente para 4K/8K e Mobile
- * - IMPORTANTE: `backdropStyle` deve manter `position: 'absolute'`, `width: '100%'` e `height: '100%'`
- *   para que o `useAspectRatioFitting` do Spectacle meça a altura real do container em 4K e Celulares.
  */
 const nepalSpectacleTheme = {
   size: {
@@ -59,11 +58,6 @@ const nepalSpectacleTheme = {
   },
 };
 
-/**
- * Transição suave de fade no container do Spectacle enquanto o CanvaFlowLayer
- * e os MorphElements do Framer Motion deslizam em velocidades ligeiramente diferentes
- * (estilo Transição "Fluxo" do Canva).
- */
 const canvaFlowSpectacleTransition = {
   from: { opacity: 0 },
   enter: { opacity: 1 },
@@ -72,8 +66,6 @@ const canvaFlowSpectacleTransition = {
 
 /**
  * Calcula exatamente o maior retângulo 16:9 possível para o viewport atual
- * (desde celulares 320px até telões de 200+ polegadas em 4K 3840x2160 ou 8K 7680x4320),
- * preenchendo 100% da tela ponta a ponta em displays 16:9 sem bordas desperdiçadas.
  */
 function useStage16x9Size() {
   const compute = useCallback(() => {
@@ -126,14 +118,14 @@ function useStage16x9Size() {
 
 /**
  * Controles em Liquid Glass ocultos por padrão no canto inferior direito:
- * - Contém Anterior, Próximo, Transmitir e Tela Cheia ocultos juntos (revelados apenas por hover/foco/toque no canto).
+ * - Mantém Anterior, Próximo, Transmitir e Tela Cheia ocultos juntos (revelados apenas por hover/foco/toque no canto).
  * - Sincroniza determinísticamente o slide ativo do Spectacle quando em modo 'screen' (Telão Receptor).
  */
 const DeckOverlayTemplate: React.FC<{
   isFullscreen: boolean;
   onToggleFullscreen: () => void;
   onDeckPositionChange: (slideIndex: number, subStep: number) => void;
-}> = ({ isFullscreen, onToggleFullscreen, onDeckPositionChange }) => {
+}> = React.memo(({ isFullscreen, onToggleFullscreen, onDeckPositionChange }) => {
   const deckCtx = React.useContext(DeckContext) as any;
   const {
     initialized,
@@ -145,7 +137,13 @@ const DeckOverlayTemplate: React.FC<{
     skipTo,
     commitTransition,
   } = deckCtx;
-  const { mode, roomId, roomState, openBroadcastModal } = useBroadcast();
+  const {
+    mode,
+    roomId,
+    roomState,
+    openBroadcastModal,
+    reportStandaloneDeckPosition,
+  } = useBroadcast();
   const [touchRevealed, setTouchRevealed] = useState(false);
 
   const activeSlideIndex = activeView?.slideIndex ?? 0;
@@ -161,7 +159,7 @@ const DeckOverlayTemplate: React.FC<{
     return () => window.clearTimeout(timer);
   }, [touchRevealed]);
 
-  // Reporta posição local do Deck para que ao abrir "Transmitir" a sala inicie no slide atual
+  // Reporta posição local do Deck via Ref (zero re-renders!) para iniciar transmissão no slide atual
   useEffect(() => {
     if (mode === 'standalone') {
       const hasInternalSteps = activeSlideIndex === 1 || activeSlideIndex === 7;
@@ -169,8 +167,9 @@ const DeckOverlayTemplate: React.FC<{
         ? Math.max(0, (typeof activeStepIndex === 'number' ? activeStepIndex : -1) + 1)
         : 0;
       onDeckPositionChange(activeSlideIndex, normalizedSubStep);
+      reportStandaloneDeckPosition(activeSlideIndex, normalizedSubStep);
     }
-  }, [mode, activeSlideIndex, activeStepIndex, onDeckPositionChange]);
+  }, [mode, activeSlideIndex, activeStepIndex, onDeckPositionChange, reportStandaloneDeckPosition]);
 
   // Sincronização determinística do Telão Receptor ('screen') com o Apresentador
   useEffect(() => {
@@ -183,12 +182,11 @@ const DeckOverlayTemplate: React.FC<{
       }
     }
 
-    // Garantia imediata caso a janela receptora esteja em segundo plano com animação pausada pelo navegador
     const verifyTimer = window.setTimeout(() => {
       if (activeSlideIndex !== targetSlide && typeof commitTransition === 'function') {
         commitTransition({ slideIndex: targetSlide, stepIndex: 0 });
       }
-    }, 260);
+    }, 240);
 
     return () => window.clearTimeout(verifyTimer);
   }, [
@@ -272,25 +270,44 @@ const DeckOverlayTemplate: React.FC<{
       </div>
     </div>
   );
-};
+});
+
+/**
+ * Subcomponente isolado para o Laser Pointer, Desenhos Vetoriais, Lupa e Cortina no Telão Receptor.
+ * Como consome `useBroadcastOverlay()` isoladamente, movimentos de 60fps do Laser Pointer
+ * NUNCA re-renderizam o <Deck> nem os slides da apresentação!
+ */
+const ReceiverStageOverlay: React.FC = React.memo(() => {
+  const { roomState } = useBroadcast();
+  const overlay = useBroadcastOverlay();
+  const strokes = overlay.drawingsBySlide[roomState.slideIndex] || [];
+
+  return (
+    <LiveAnnotationOverlay
+      strokes={strokes}
+      pointer={overlay.pointer}
+      spotlight={overlay.spotlight}
+      blackout={overlay.blackout}
+      variant="receiver"
+    />
+  );
+});
 
 function AppPresentationShell() {
   const { width, height, scale } = useStage16x9Size();
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [deckPos, setDeckPos] = useState<{ slideIndex: number; subStep: number }>({
+  const deckPosRef = useRef<{ slideIndex: number; subStep: number }>({
     slideIndex: 0,
     subStep: 0,
   });
 
-  const { mode, roomState } = useBroadcast();
+  const { mode } = useBroadcast();
 
   const handleDeckPositionChange = useCallback((slideIndex: number, subStep: number) => {
-    setDeckPos((prev) =>
-      prev.slideIndex === slideIndex && prev.subStep === subStep
-        ? prev
-        : { slideIndex, subStep }
-    );
+    deckPosRef.current = { slideIndex, subStep };
   }, []);
+
+  const getDeckPosition = useCallback(() => deckPosRef.current, []);
 
   const toggleFullscreen = useCallback(() => {
     if (typeof document === 'undefined') return;
@@ -324,20 +341,24 @@ function AppPresentationShell() {
     };
   }, [toggleFullscreen]);
 
+  const stageConfig = useMemo(
+    () => ({
+      isPreview: false,
+      forcedSubStep: null,
+      disableSlideTapAdvance: mode === 'screen',
+    }),
+    [mode]
+  );
+
   // Se este dispositivo é o Transmissor / Controle Remoto, exibe o Console do Apresentador completo
   if (mode === 'presenter') {
     return (
       <>
         <PresenterConsole />
-        <BroadcastModal
-          currentDeckSlideIndex={roomState.slideIndex}
-          currentDeckSubStep={roomState.subStep}
-        />
+        <BroadcastModal />
       </>
     );
   }
-
-  const activeReceiverStrokes = roomState.drawingsBySlide[roomState.slideIndex] || [];
 
   return (
     <main className="w-screen h-screen w-[100dvw] h-[100dvh] bg-[#0e0f12] flex flex-col items-center justify-center overflow-hidden select-none">
@@ -352,87 +373,72 @@ function AppPresentationShell() {
           } as React.CSSProperties
         }
       >
-        <StageInstanceProvider
-          value={{
-            isPreview: false,
-            forcedSubStep: null,
-            disableSlideTapAdvance: mode === 'screen',
-          }}
-        >
+        <StageInstanceProvider value={stageConfig}>
           <LayoutGroup id="missao-nepal-deck">
             <AnimatePresence mode="sync">
-              <Deck
-                theme={nepalSpectacleTheme}
-                transition={canvaFlowSpectacleTransition}
-                template={
-                  <DeckOverlayTemplate
-                    isFullscreen={isFullscreen}
-                    onToggleFullscreen={toggleFullscreen}
-                    onDeckPositionChange={handleDeckPositionChange}
-                  />
-                }
-              >
-                {/* SLIDE 01: CAPA (MISSÃO NEPAL & LIBERDADE RELIGIOSA) */}
-                <Slide backgroundColor="#f4f2eb" padding={0}>
-                  <Slide01CoverContent />
-                </Slide>
+              <div className="nepal-deck-host">
+                <Deck
+                  theme={nepalSpectacleTheme}
+                  transition={canvaFlowSpectacleTransition}
+                  template={
+                    <DeckOverlayTemplate
+                      isFullscreen={isFullscreen}
+                      onToggleFullscreen={toggleFullscreen}
+                      onDeckPositionChange={handleDeckPositionChange}
+                    />
+                  }
+                >
+                  {/* SLIDE 01: CAPA (MISSÃO NEPAL & LIBERDADE RELIGIOSA) */}
+                  <Slide backgroundColor="#f4f2eb" padding={0}>
+                    <Slide01CoverContent />
+                  </Slide>
 
-                {/* SLIDE 02: ASPECTOS GEOGRÁFICOS (ANIMAÇÃO CONTÍNUA 3D EM 4 ETAPAS) */}
-                <Slide backgroundColor="#f4f2eb" padding={0}>
-                  <Slide02GeographyContent />
-                </Slide>
+                  {/* SLIDE 02: ASPECTOS GEOGRÁFICOS (ANIMAÇÃO CONTÍNUA 3D EM 4 ETAPAS) */}
+                  <Slide backgroundColor="#f4f2eb" padding={0}>
+                    <Slide02GeographyContent />
+                  </Slide>
 
-                {/* SLIDE 03: ECONOMIA, PIB, PIB PER CAPITA & IDH (COMPARATIVO BRASIL E MUNDO) */}
-                <Slide backgroundColor="#f4f2eb" padding={0}>
-                  <Slide02AEconomyHDIContent />
-                </Slide>
+                  {/* SLIDE 03: ECONOMIA, PIB, PIB PER CAPITA & IDH (COMPARATIVO BRASIL E MUNDO) */}
+                  <Slide backgroundColor="#f4f2eb" padding={0}>
+                    <Slide02AEconomyHDIContent />
+                  </Slide>
 
-                {/* SLIDE 04: 124 LÍNGUAS FALADAS & O SISTEMA DE CASTAS */}
-                <Slide backgroundColor="#f4f2eb" padding={0}>
-                  <Slide02BLanguagesCastesContent />
-                </Slide>
+                  {/* SLIDE 04: 124 LÍNGUAS FALADAS & O SISTEMA DE CASTAS */}
+                  <Slide backgroundColor="#f4f2eb" padding={0}>
+                    <Slide02BLanguagesCastesContent />
+                  </Slide>
 
-                {/* SLIDE 05: COSTUMES COTIDIANOS (GENTILEZA, MÃO ESQUERDA, SAPATOS, DAL BHAT & JUTHO) */}
-                <Slide backgroundColor="#f4f2eb" padding={0}>
-                  <Slide02CDailyCustomsContent />
-                </Slide>
+                  {/* SLIDE 05: COSTUMES COTIDIANOS (GENTILEZA, MÃO ESQUERDA, SAPATOS, DAL BHAT & JUTHO) */}
+                  <Slide backgroundColor="#f4f2eb" padding={0}>
+                    <Slide02CDailyCustomsContent />
+                  </Slide>
 
-                {/* SLIDE 06: MÃO INGLESA, TRÂNSITO CAÓTICO & VACAS SAGRADAS */}
-                <Slide backgroundColor="#f4f2eb" padding={0}>
-                  <Slide02DStreetsMobilityContent />
-                </Slide>
+                  {/* SLIDE 06: MÃO INGLESA, TRÂNSITO CAÓTICO & VACAS SAGRADAS */}
+                  <Slide backgroundColor="#f4f2eb" padding={0}>
+                    <Slide02DStreetsMobilityContent />
+                  </Slide>
 
-                {/* SLIDE 07: RITUAIS DE CREMAÇÃO PÚBLICA & GRANDES FESTIVAIS DE OUTONO (DASHAIN, TIHAR & CHHATH) */}
-                <Slide backgroundColor="#f4f2eb" padding={0}>
-                  <Slide02ERitualsFestivalsContent />
-                </Slide>
+                  {/* SLIDE 07: RITUAIS DE CREMAÇÃO PÚBLICA & GRANDES FESTIVAIS DE OUTONO (DASHAIN, TIHAR & CHHATH) */}
+                  <Slide backgroundColor="#f4f2eb" padding={0}>
+                    <Slide02ERitualsFestivalsContent />
+                  </Slide>
 
-                {/* SLIDE 08: LINHA DO TEMPO HISTÓRICA & AVANÇO DO CRISTIANISMO (8 ETAPAS + GRÁFICO) */}
-                <Slide backgroundColor="#f4f2eb" padding={0}>
-                  <Slide03TimelineContent />
-                </Slide>
-              </Deck>
+                  {/* SLIDE 08: LINHA DO TEMPO HISTÓRICA & AVANÇO DO CRISTIANISMO (8 ETAPAS + GRÁFICO) */}
+                  <Slide backgroundColor="#f4f2eb" padding={0}>
+                    <Slide03TimelineContent />
+                  </Slide>
+                </Deck>
+              </div>
             </AnimatePresence>
           </LayoutGroup>
         </StageInstanceProvider>
 
-        {/* Camada vetorial em tempo real (Laser Pointer, Desenhos, Spotlight e Cortina Escura) no Telão Receptor */}
-        {mode === 'screen' && (
-          <LiveAnnotationOverlay
-            strokes={activeReceiverStrokes}
-            pointer={roomState.pointer}
-            spotlight={roomState.spotlight}
-            blackout={roomState.blackout}
-            variant="receiver"
-          />
-        )}
+        {/* Camada vetorial em tempo real isolada (Laser Pointer, Desenhos, Spotlight e Cortina Escura) no Telão Receptor */}
+        {mode === 'screen' && <ReceiverStageOverlay />}
       </div>
 
-      {/* Modal de Transmissão LAN, Pareamento QR Code e Código de 4 Dígitos */}
-      <BroadcastModal
-        currentDeckSlideIndex={deckPos.slideIndex}
-        currentDeckSubStep={deckPos.subStep}
-      />
+      {/* Modal de Transmissão P2P / Wi-Fi, Pareamento QR Code e Código de 4 Dígitos */}
+      <BroadcastModal getDeckPosition={getDeckPosition} />
     </main>
   );
 }
@@ -444,4 +450,3 @@ export default function App() {
     </BroadcastProvider>
   );
 }
-

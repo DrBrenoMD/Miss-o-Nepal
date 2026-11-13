@@ -7,15 +7,20 @@ import React, {
   useCallback,
   useMemo,
 } from 'react';
+import Peer, { DataConnection } from 'peerjs';
 import {
   BroadcastMode,
-  RoomSyncState,
+  BroadcastNavState,
+  BroadcastOverlayState,
+  ClientPresence,
   DrawingStroke,
+  NetworkDeviceInfo,
+  PointerState,
+  RemoteCastCommand,
+  RoomSyncState,
   SlideCustomState,
   SpotlightState,
-  NetworkInfoResponse,
-  NetworkDeviceInfo,
-  RemoteCastCommand,
+  TimerState,
 } from './types';
 import {
   clampPosition,
@@ -24,9 +29,33 @@ import {
   makeNoteKey,
   PRESENTATION_SLIDES,
 } from './presentationMetadata';
+import {
+  StageInstanceConfig,
+  StageInstanceProvider,
+  useStageInstance,
+} from '../StageInstanceContext';
+
+export { StageInstanceProvider, useStageInstance };
+export type { StageInstanceConfig };
 
 const NOTES_STORAGE_KEY = 'missao_nepal_speaker_notes_v1';
 const CLIENT_ID_KEY = 'missao_nepal_client_id_v1';
+const NET_HASH_KEY = 'missao_nepal_net_hash_v3';
+
+const LAN_SLOT_COUNT = 6;
+const PEER_PREFIX = 'mn-nepal-v3';
+
+const PEER_CONFIG = {
+  debug: 0,
+  config: {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun2.l.google.com:19302' },
+      { urls: 'stun:global.stun.twilio.com:3478' },
+    ],
+  },
+};
 
 function getOrCreateClientId(): string {
   if (typeof window === 'undefined') return 'server';
@@ -39,6 +68,102 @@ function getOrCreateClientId(): string {
   } catch {
     return `dev-${Math.random().toString(36).slice(2, 9)}`;
   }
+}
+
+function hashStringHex(input: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < input.length; i++) {
+    h ^= input.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16).padStart(8, '0');
+}
+
+function normalizePublicIpForLanMatch(rawIp: string): string {
+  const trimmed = rawIp.trim().toLowerCase();
+  if (!trimmed) return 'localdefault';
+  // Se for IPv6, agrupa pelo prefixo /64 do roteador Wi-Fi (4 primeiros blocos)
+  if (trimmed.includes(':')) {
+    return trimmed.split(':').slice(0, 4).join(':');
+  }
+  return trimmed;
+}
+
+async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {
+  const ctrl = new AbortController();
+  const timer = window.setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    return await fetch(url, { signal: ctrl.signal, cache: 'no-store' });
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
+/**
+ * Descobre o IP público do roteador Wi-Fi atual (IPv4 prioritário) para agrupar automaticamente
+ * celulares, computadores e Smart TVs conectados na mesma rede Wi-Fi — funcionando tanto na Vercel
+ * quanto entre domínios diferentes do Google AI Studio (`ais-dev` ↔ `ais-pre`) sem backend!
+ */
+async function resolvePublicNetworkHash(): Promise<string> {
+  if (typeof window === 'undefined') return 'localdefault';
+  try {
+    const cached = window.sessionStorage.getItem(NET_HASH_KEY);
+    if (cached) return cached;
+  } catch {
+    // Ignora
+  }
+
+  let resolvedIp = '';
+
+  // 1. ipify IPv4-only (garante mesmo IP NAT em redes dual-stack entre PC e Celular)
+  try {
+    const res = await fetchWithTimeout('https://api.ipify.org?format=json', 2400);
+    if (res.ok) {
+      const data = await res.json();
+      if (data?.ip) resolvedIp = String(data.ip);
+    }
+  } catch {
+    // Tenta fallback
+  }
+
+  // 2. api4.ipify.org fallback
+  if (!resolvedIp) {
+    try {
+      const res = await fetchWithTimeout('https://api4.ipify.org?format=json', 2400);
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.ip) resolvedIp = String(data.ip);
+      }
+    } catch {
+      // Tenta fallback
+    }
+  }
+
+  // 3. Cloudflare trace fallback
+  if (!resolvedIp) {
+    try {
+      const res = await fetchWithTimeout('https://www.cloudflare.com/cdn-cgi/trace', 2400);
+      if (res.ok) {
+        const text = await res.text();
+        const match = text.match(/^ip=(.+)$/m);
+        if (match?.[1]) resolvedIp = match[1].trim();
+      }
+    } catch {
+      // Tenta fallback padrão
+    }
+  }
+
+  const hash = resolvedIp
+    ? hashStringHex(normalizePublicIpForLanMatch(resolvedIp))
+    : 'localdefault';
+
+  try {
+    window.sessionStorage.setItem(NET_HASH_KEY, hash);
+  } catch {
+    // Ignora
+  }
+
+  return hash;
 }
 
 function detectDeviceProfile(): {
@@ -95,6 +220,10 @@ function generateRoomCode(): string {
   return String(num);
 }
 
+function sanitizePeerRoomToken(roomId: string): string {
+  return roomId.replace(/[^A-Z0-9_-]/gi, '').toUpperCase() || '0000';
+}
+
 function loadSavedNotes(): Record<string, string> {
   if (typeof window === 'undefined') return {};
   try {
@@ -107,36 +236,18 @@ function loadSavedNotes(): Record<string, string> {
   }
 }
 
-/**
- * Contexto leve por instância de palco (permite renderizar Tela Atual + Próxima Etapa
- * lado a lado no Console do Apresentador sem colisão de steps ou cliques).
- */
-export interface StageInstanceConfig {
-  isPreview: boolean;
-  forcedSubStep: number | null;
-  disableSlideTapAdvance: boolean;
-}
-
-const StageInstanceContext = createContext<StageInstanceConfig>({
-  isPreview: false,
-  forcedSubStep: null,
-  disableSlideTapAdvance: false,
-});
-
-export const StageInstanceProvider = StageInstanceContext.Provider;
-export const useStageInstance = () => useContext(StageInstanceContext);
-
+// ============================================================================
+// 1. CONTEXTO DE NAVEGAÇÃO E AÇÕES ESTÁVEIS (CONSUMIDO PELO DECK E SLIDES)
+// Nunca atualiza em movimentos de laser pointer, desenhos, cronômetro ou busca Wi-Fi!
+// ============================================================================
 export interface BroadcastContextValue {
   myClientId: string;
   mode: BroadcastMode;
   roomId: string;
-  connected: boolean;
-  roomState: RoomSyncState;
-  networkDevices: NetworkDeviceInfo[];
-  isBroadcastModalOpen: boolean;
-  networkInfo: NetworkInfoResponse | null;
+  roomState: BroadcastNavState;
   openBroadcastModal: () => void;
   closeBroadcastModal: () => void;
+  reportStandaloneDeckPosition: (slideIndex: number, subStep: number) => void;
   startPresenting: (
     customRoomId?: string,
     initialPos?: { slideIndex: number; subStep: number }
@@ -160,13 +271,32 @@ export interface BroadcastContextValue {
   undoStroke: (slideIndex: number) => void;
   clearStrokes: (slideIndex: number) => void;
   updateSlideCustomState: (patch: Partial<SlideCustomState>) => void;
-  getNoteForStep: (slideIndex: number, subStep: number) => string;
   updateNoteForStep: (slideIndex: number, subStep: number, text: string) => void;
   timerAction: (action: 'start' | 'pause' | 'reset') => void;
-  refreshNetworkInfo: () => Promise<void>;
+  scanNetworkDevices: () => Promise<void>;
+}
+
+// ============================================================================
+// 2. CONTEXTO DE CAMADA VETORIAL / OVERLAY AO VIVO (CONSUMIDO APENAS PELO SVG E CONSOLE)
+// ============================================================================
+export interface BroadcastOverlayContextValue extends BroadcastOverlayState {}
+
+// ============================================================================
+// 3. CONTEXTO DE DESCOBERTA NA REDE, PRESENÇA E NOTAS (MODAL E CONSOLE)
+// ============================================================================
+export interface BroadcastDiscoveryContextValue {
+  connected: boolean;
+  isBroadcastModalOpen: boolean;
+  isScanningNetwork: boolean;
+  networkDevices: NetworkDeviceInfo[];
+  presence: ClientPresence[];
+  customNotes: Record<string, string>;
+  getNoteForStep: (slideIndex: number, subStep: number) => string;
 }
 
 const BroadcastContext = createContext<BroadcastContextValue | null>(null);
+const BroadcastOverlayContext = createContext<BroadcastOverlayContextValue | null>(null);
+const BroadcastDiscoveryContext = createContext<BroadcastDiscoveryContextValue | null>(null);
 
 export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const initialUrlParams = useMemo(() => {
@@ -194,49 +324,77 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   const [mode, setMode] = useState<BroadcastMode>(initialUrlParams.mode);
   const [roomId, setRoomId] = useState<string>(initialUrlParams.room);
-  const [connected, setConnected] = useState<boolean>(false);
-  const [networkDevices, setNetworkDevices] = useState<NetworkDeviceInfo[]>([]);
-  const [isBroadcastModalOpen, setIsBroadcastModalOpen] = useState<boolean>(false);
-  const [networkInfo, setNetworkInfo] = useState<NetworkInfoResponse | null>(null);
 
-  const [roomState, setRoomState] = useState<RoomSyncState>(() => ({
+  // Estado 1: Navegação & Controles Contextuais de Slide (ultra-leve)
+  const [navState, setNavState] = useState<BroadcastNavState>(() => ({
     roomId: initialUrlParams.room,
-    version: 0,
     slideIndex: 0,
     subStep: 0,
-    blackout: false,
-    spotlight: null,
-    pointer: null,
-    drawingsBySlide: {},
     slideCustomState: {
       economyMetric: 'perCapita',
       casteTier: null,
       timelineLens: 'auto',
     },
-    customNotes: loadSavedNotes(),
+  }));
+
+  // Estado 2: Laser Pointer, Desenho Vetorial, Lupa, Cortina e Cronômetro
+  const [overlayState, setOverlayState] = useState<BroadcastOverlayState>(() => ({
+    blackout: false,
+    spotlight: null,
+    pointer: null,
+    drawingsBySlide: {},
     timer: {
       running: false,
       elapsedMs: 0,
       startedAt: null,
     },
-    presence: [],
     serverTimeOffsetMs: 0,
   }));
 
+  // Estado 3: Descoberta P2P na Rede, Presença, Modal e Notas
+  const [connected, setConnected] = useState<boolean>(false);
+  const [isBroadcastModalOpen, setIsBroadcastModalOpen] = useState<boolean>(false);
+  const [isScanningNetwork, setIsScanningNetwork] = useState<boolean>(false);
+  const [networkDevices, setNetworkDevices] = useState<NetworkDeviceInfo[]>([]);
+  const [presence, setPresence] = useState<ClientPresence[]>([]);
+  const [customNotes, setCustomNotes] = useState<Record<string, string>>(() => loadSavedNotes());
+  const [netHash, setNetHash] = useState<string>('');
+  const [p2pActivated, setP2pActivated] = useState<boolean>(() => initialUrlParams.mode !== 'standalone');
+
+  // Refs espelhados para que 100% dos callbacks tenham identidade estável (zero re-renders em cascata)
   const clientIdRef = useRef<string>(getOrCreateClientId());
   const deviceProfileRef = useRef(detectDeviceProfile());
   const modeRef = useRef<BroadcastMode>(mode);
   const roomIdRef = useRef<string>(roomId);
-  const roomVersionRef = useRef<number>(0);
-  const devicesVersionRef = useRef<number>(0);
-  const pendingDiscreteActionsRef = useRef<number>(0);
+  const navStateRef = useRef<BroadcastNavState>(navState);
+  const overlayStateRef = useRef<BroadcastOverlayState>(overlayState);
+  const customNotesRef = useRef<Record<string, string>>(customNotes);
+  const presenceRef = useRef<ClientPresence[]>(presence);
+  const standaloneDeckPosRef = useRef<{ slideIndex: number; subStep: number }>({
+    slideIndex: 0,
+    subStep: 0,
+  });
+  const roomVersionRef = useRef<number>(1);
 
-  const wsRef = useRef<WebSocket | null>(null);
+  // Refs de transporte WebRTC (PeerJS) e BroadcastChannel
   const bcRef = useRef<BroadcastChannel | null>(null);
+  const roomPeerRef = useRef<Peer | null>(null);
+  const isRoomHubRef = useRef<boolean>(false);
+  const hubConnectionsRef = useRef<Map<string, { conn: DataConnection; meta: ClientPresence }>>(
+    new Map()
+  );
+  const spokeConnRef = useRef<DataConnection | null>(null);
 
-  // Fila coalescida para eventos contínuos (Laser Pointer / Desenho) em HTTP
-  const continuousInFlightRef = useRef<boolean>(false);
-  const queuedContinuousActionRef = useRef<Record<string, unknown> | null>(null);
+  const beaconPeerRef = useRef<Peer | null>(null);
+  const myBeaconIdRef = useRef<string>('');
+  const scannerPeerRef = useRef<Peer | null>(null);
+  const discoveredMapRef = useRef<Map<string, NetworkDeviceInfo>>(new Map());
+  const netHashRef = useRef<string>('');
+
+  // Controle de cadência ~45fps para canais contínuos WebRTC (evita fila SCTP em celulares)
+  const lastContinuousSentAtRef = useRef<number>(0);
+  const trailingContinuousTimerRef = useRef<number | null>(null);
+  const pendingContinuousMsgRef = useRef<Record<string, unknown> | null>(null);
 
   useEffect(() => {
     modeRef.current = mode;
@@ -246,132 +404,45 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     roomIdRef.current = roomId;
   }, [roomId]);
 
-  const applyRemoteCastCommand = useCallback((cmd: RemoteCastCommand) => {
-    if (!cmd || !cmd.roomId) return;
-    const cleanRoom = cmd.roomId.trim().toUpperCase();
-    const clamped = clampPosition(cmd.slideIndex ?? 0, cmd.subStep ?? 0);
-    roomIdRef.current = cleanRoom;
-    modeRef.current = cmd.targetMode;
-    roomVersionRef.current = 0;
-    setRoomId(cleanRoom);
-    setMode(cmd.targetMode);
-    setIsBroadcastModalOpen(false);
-    setRoomState((prev) => ({
-      ...prev,
-      roomId: cleanRoom,
-      slideIndex: clamped.slideIndex,
-      subStep: clamped.subStep,
-      pointer: null,
-    }));
-  }, []);
-
-  const applyRoomSnapshot = useCallback((st: Record<string, any>, forceOverride = false) => {
-    if (!st) return;
-    const incomingVersion = typeof st.version === 'number' ? st.version : 0;
-    const isPresenter = modeRef.current === 'presenter';
-
-    // Se somos o apresentador com cliques discretos em trânsito, atualiza apenas presença
-    if (isPresenter && pendingDiscreteActionsRef.current > 0 && !forceOverride) {
-      if (Array.isArray(st.presence)) {
-        setRoomState((prev) => ({ ...prev, presence: st.presence }));
-      }
-      return;
-    }
-
-    if (incomingVersion > 0) {
-      roomVersionRef.current = Math.max(roomVersionRef.current, incomingVersion);
-    }
-
-    const offset = typeof st.serverTime === 'number' ? st.serverTime - Date.now() : 0;
-    const clamped = clampPosition(
-      typeof st.slideIndex === 'number' ? st.slideIndex : 0,
-      typeof st.subStep === 'number' ? st.subStep : 0
-    );
-
-    setRoomState((prev) => ({
-      roomId: st.roomId || prev.roomId,
-      version: incomingVersion || prev.version,
-      slideIndex: clamped.slideIndex,
-      subStep: clamped.subStep,
-      blackout: Boolean(st.blackout),
-      spotlight: isPresenter && !forceOverride ? prev.spotlight : st.spotlight ?? null,
-      pointer: isPresenter && !forceOverride ? prev.pointer : st.pointer ?? null,
-      drawingsBySlide: st.drawingsBySlide || prev.drawingsBySlide,
-      slideCustomState: st.slideCustomState || prev.slideCustomState,
-      customNotes: { ...prev.customNotes, ...(st.customNotes || {}) },
-      timer: st.timer || prev.timer,
-      presence: Array.isArray(st.presence) ? st.presence : prev.presence,
-      serverTimeOffsetMs: offset,
-    }));
-  }, []);
-
-  const registerPresenceHttp = useCallback(
-    async (extra?: {
-      targetMode?: BroadcastMode;
-      targetRoomId?: string;
-      initialSlideIndex?: number;
-      initialSubStep?: number;
-    }) => {
-      try {
-        const effectiveMode = extra?.targetMode ?? modeRef.current;
-        const effectiveRoom = extra?.targetRoomId ?? roomIdRef.current;
-        const res = await fetch('/api/cast/register', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            clientId: clientIdRef.current,
-            deviceLabel: deviceProfileRef.current.label,
-            deviceType: deviceProfileRef.current.type,
-            screenResolution: deviceProfileRef.current.resolution,
-            mode: effectiveMode,
-            roomId: effectiveRoom,
-            initialSlideIndex: extra?.initialSlideIndex,
-            initialSubStep: extra?.initialSubStep,
-          }),
-        });
-        if (!res.ok) return;
-        const data = await res.json();
-        setConnected(true);
-        if (typeof data.devicesVersion === 'number') {
-          devicesVersionRef.current = data.devicesVersion;
-        }
-        if (Array.isArray(data.devices)) {
-          setNetworkDevices(
-            data.devices.filter((d: NetworkDeviceInfo) => d.clientId !== clientIdRef.current)
-          );
-        }
-        if (data.castCommand) {
-          applyRemoteCastCommand(data.castCommand as RemoteCastCommand);
-        } else if (data.roomState) {
-          applyRoomSnapshot(data.roomState, effectiveMode !== 'presenter');
-        }
-      } catch {
-        // Tentará novamente no ciclo de long-polling
-      }
-    },
-    [applyRemoteCastCommand, applyRoomSnapshot]
-  );
-
-  const refreshNetworkInfo = useCallback(async () => {
-    try {
-      const [netRes] = await Promise.all([
-        fetch('/api/network-info'),
-        registerPresenceHttp(),
-      ]);
-      if (netRes.ok) {
-        const data = (await netRes.json()) as NetworkInfoResponse;
-        setNetworkInfo(data);
-      }
-    } catch {
-      // Fallback silencioso
-    }
-  }, [registerPresenceHttp]);
+  useEffect(() => {
+    navStateRef.current = navState;
+  }, [navState]);
 
   useEffect(() => {
-    refreshNetworkInfo();
-  }, [refreshNetworkInfo]);
+    overlayStateRef.current = overlayState;
+  }, [overlayState]);
 
-  // Atualiza URL com sala/modo preservando demais parâmetros
+  useEffect(() => {
+    customNotesRef.current = customNotes;
+  }, [customNotes]);
+
+  useEffect(() => {
+    presenceRef.current = presence;
+  }, [presence]);
+
+  // Ativação diferida em 900ms quando em modo standalone para garantir 60fps puros na animação de abertura
+  useEffect(() => {
+    if (p2pActivated) return;
+    const t = window.setTimeout(() => setP2pActivated(true), 900);
+    return () => window.clearTimeout(t);
+  }, [p2pActivated]);
+
+  // Resolve hash da rede Wi-Fi pública (uma única vez por sessão)
+  useEffect(() => {
+    if (!p2pActivated) return;
+    let cancelled = false;
+    resolvePublicNetworkHash().then((hash) => {
+      if (!cancelled) {
+        netHashRef.current = hash;
+        setNetHash(hash);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [p2pActivated]);
+
+  // Sincroniza URL da barra de endereços sem recarregar
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const url = new URL(window.location.href);
@@ -387,73 +458,202 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     window.history.replaceState({}, '', url.toString());
   }, [mode, roomId]);
 
-  // Processador idempotente para mensagens instantâneas vindas de WebSocket ou BroadcastChannel
-  const applyRealtimeEvent = useCallback(
+  const buildMyDeviceInfo = useCallback((): NetworkDeviceInfo => {
+    const activeSlide =
+      modeRef.current === 'standalone'
+        ? standaloneDeckPosRef.current.slideIndex
+        : navStateRef.current.slideIndex;
+    return {
+      clientId: clientIdRef.current,
+      beaconPeerId: myBeaconIdRef.current || undefined,
+      deviceLabel: deviceProfileRef.current.label,
+      deviceType: deviceProfileRef.current.type,
+      screenResolution: deviceProfileRef.current.resolution,
+      mode: modeRef.current,
+      roomId: roomIdRef.current,
+      slideIndex: activeSlide,
+      sameNetwork: true,
+      lastSeenAt: Date.now(),
+    };
+  }, []);
+
+  const buildFullRoomSnapshot = useCallback((): RoomSyncState & { serverTime: number } => {
+    const nav = navStateRef.current;
+    const ov = overlayStateRef.current;
+    return {
+      roomId: roomIdRef.current,
+      version: roomVersionRef.current,
+      slideIndex: nav.slideIndex,
+      subStep: nav.subStep,
+      slideCustomState: nav.slideCustomState,
+      blackout: ov.blackout,
+      spotlight: ov.spotlight,
+      pointer: ov.pointer,
+      drawingsBySlide: ov.drawingsBySlide,
+      timer: ov.timer,
+      serverTimeOffsetMs: 0,
+      customNotes: customNotesRef.current,
+      presence: presenceRef.current,
+      serverTime: Date.now(),
+    };
+  }, []);
+
+  const syncDiscoveredStateFromMap = useCallback(() => {
+    const now = Date.now();
+    const list: NetworkDeviceInfo[] = [];
+    discoveredMapRef.current.forEach((dev, id) => {
+      if (id === clientIdRef.current) return;
+      if (now - dev.lastSeenAt > 30000) {
+        discoveredMapRef.current.delete(id);
+        return;
+      }
+      list.push(dev);
+    });
+    list.sort((a, b) => a.deviceLabel.localeCompare(b.deviceLabel));
+    setNetworkDevices(list);
+  }, []);
+
+  const upsertDiscoveredDevice = useCallback(
+    (dev: NetworkDeviceInfo | undefined | null) => {
+      if (!dev || !dev.clientId || dev.clientId === clientIdRef.current) return;
+      const existing = discoveredMapRef.current.get(dev.clientId);
+      discoveredMapRef.current.set(dev.clientId, {
+        ...existing,
+        ...dev,
+        beaconPeerId: dev.beaconPeerId || existing?.beaconPeerId,
+        sameNetwork: true,
+        lastSeenAt: Date.now(),
+      });
+      syncDiscoveredStateFromMap();
+    },
+    [syncDiscoveredStateFromMap]
+  );
+
+  const applyRemoteCastCommand = useCallback((cmd: RemoteCastCommand) => {
+    if (!cmd || !cmd.roomId) return;
+    const cleanRoom = sanitizePeerRoomToken(cmd.roomId);
+    const clamped = clampPosition(cmd.slideIndex ?? 0, cmd.subStep ?? 0);
+
+    roomIdRef.current = cleanRoom;
+    modeRef.current = cmd.targetMode;
+    setP2pActivated(true);
+    setRoomId(cleanRoom);
+    setMode(cmd.targetMode);
+    setIsBroadcastModalOpen(false);
+
+    setNavState((prev) => ({
+      ...prev,
+      roomId: cleanRoom,
+      slideIndex: clamped.slideIndex,
+      subStep: clamped.subStep,
+    }));
+    setOverlayState((prev) => ({
+      ...prev,
+      pointer: null,
+    }));
+  }, []);
+
+  const applyRoomSnapshot = useCallback((st: Record<string, any>) => {
+    if (!st) return;
+    const clamped = clampPosition(
+      typeof st.slideIndex === 'number' ? st.slideIndex : 0,
+      typeof st.subStep === 'number' ? st.subStep : 0
+    );
+    const offset = typeof st.serverTime === 'number' ? st.serverTime - Date.now() : 0;
+
+    setNavState((prev) => ({
+      roomId: st.roomId || prev.roomId,
+      slideIndex: clamped.slideIndex,
+      subStep: clamped.subStep,
+      slideCustomState: st.slideCustomState || prev.slideCustomState,
+    }));
+
+    setOverlayState((prev) => ({
+      blackout: Boolean(st.blackout),
+      spotlight: st.spotlight ?? null,
+      pointer: st.pointer ?? null,
+      drawingsBySlide: st.drawingsBySlide || prev.drawingsBySlide,
+      timer: st.timer || prev.timer,
+      serverTimeOffsetMs: offset,
+    }));
+
+    if (st.customNotes && typeof st.customNotes === 'object') {
+      setCustomNotes((prev) => ({ ...prev, ...st.customNotes }));
+    }
+
+    if (Array.isArray(st.presence)) {
+      setPresence(st.presence);
+    }
+  }, []);
+
+  const applyRealtimeRoomMessage = useCallback(
     (msg: Record<string, any>) => {
       const type = String(msg.type || '');
 
-      if (type === 'cast:command' && msg.command) {
+      if (type === 'lan:summon' && msg.command) {
         applyRemoteCastCommand(msg.command as RemoteCastCommand);
         return;
       }
 
-      if (typeof msg.version === 'number' && msg.version > roomVersionRef.current) {
-        roomVersionRef.current = msg.version;
-      }
-
       if (type === 'room:init' && msg.state) {
-        applyRoomSnapshot(msg.state, modeRef.current !== 'presenter');
+        applyRoomSnapshot(msg.state);
         return;
       }
 
       if (type === 'room:presence' && Array.isArray(msg.presence)) {
-        setRoomState((prev) => ({ ...prev, presence: msg.presence }));
+        setPresence(msg.presence);
         return;
       }
 
-      if (type === 'nav:updated' || type === 'nav:goto') {
+      if (type === 'nav:goto') {
         const pos = clampPosition(Number(msg.slideIndex) || 0, Number(msg.subStep) || 0);
-        setRoomState((prev) => ({
-          ...prev,
-          slideIndex: pos.slideIndex,
-          subStep: pos.subStep,
-          pointer: msg.pointer !== undefined ? msg.pointer : null,
-        }));
+        setNavState((prev) =>
+          prev.slideIndex === pos.slideIndex && prev.subStep === pos.subStep
+            ? prev
+            : {
+                ...prev,
+                slideIndex: pos.slideIndex,
+                subStep: pos.subStep,
+              }
+        );
+        if (msg.clearPointer) {
+          setOverlayState((prev) => (prev.pointer ? { ...prev, pointer: null } : prev));
+        }
         return;
       }
 
       if (type === 'stage:blackout') {
-        setRoomState((prev) => ({ ...prev, blackout: Boolean(msg.blackout) }));
+        const nextBlackout = Boolean(msg.blackout);
+        setOverlayState((prev) =>
+          prev.blackout === nextBlackout ? prev : { ...prev, blackout: nextBlackout }
+        );
         return;
       }
 
       if (type === 'stage:spotlight') {
-        setRoomState((prev) => ({ ...prev, spotlight: msg.spotlight ?? null }));
+        setOverlayState((prev) => ({ ...prev, spotlight: msg.spotlight ?? null }));
         return;
       }
 
-      if (type === 'pointer:updated' || type === 'pointer:move') {
-        const pointerPayload =
-          type === 'pointer:updated'
-            ? msg.pointer
-            : msg.active
-            ? {
-                active: true,
-                x: Number(msg.x) || 0,
-                y: Number(msg.y) || 0,
-                color: String(msg.color || '#dc143c'),
-                updatedAt: Date.now(),
-              }
-            : null;
-        setRoomState((prev) => ({ ...prev, pointer: pointerPayload }));
+      if (type === 'pointer:move') {
+        const nextPointer: PointerState | null = msg.active
+          ? {
+              active: true,
+              x: Number(msg.x) || 0,
+              y: Number(msg.y) || 0,
+              color: String(msg.color || '#dc143c'),
+              updatedAt: Date.now(),
+            }
+          : null;
+        setOverlayState((prev) => ({ ...prev, pointer: nextPointer }));
         return;
       }
 
-      if (type === 'draw:upserted' || type === 'draw:upsert') {
+      if (type === 'draw:upsert') {
         const sIdx = Number(msg.slideIndex) || 0;
         const stroke = msg.stroke as DrawingStroke | undefined;
         if (!stroke || !stroke.id) return;
-        setRoomState((prev) => {
+        setOverlayState((prev) => {
           const list = [...(prev.drawingsBySlide[sIdx] || [])];
           const idx = list.findIndex((s) => s.id === stroke.id);
           if (idx >= 0) {
@@ -472,38 +672,51 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         return;
       }
 
-      if (type === 'draw:synced') {
+      if (type === 'draw:undo') {
         const sIdx = Number(msg.slideIndex) || 0;
-        setRoomState((prev) => ({
+        setOverlayState((prev) => {
+          const list = [...(prev.drawingsBySlide[sIdx] || [])];
+          list.pop();
+          return {
+            ...prev,
+            drawingsBySlide: {
+              ...prev.drawingsBySlide,
+              [sIdx]: list,
+            },
+          };
+        });
+        return;
+      }
+
+      if (type === 'draw:clear') {
+        const sIdx = Number(msg.slideIndex) || 0;
+        setOverlayState((prev) => ({
           ...prev,
           drawingsBySlide: {
             ...prev.drawingsBySlide,
-            [sIdx]: Array.isArray(msg.strokes) ? msg.strokes : [],
+            [sIdx]: [],
           },
         }));
         return;
       }
 
-      if (type === 'slide:custom') {
-        const nextCustom = msg.slideCustomState || msg.patch;
-        if (nextCustom) {
-          setRoomState((prev) => ({
-            ...prev,
-            slideCustomState: {
-              ...prev.slideCustomState,
-              ...nextCustom,
-            },
-          }));
-        }
+      if (type === 'slide:custom' && msg.patch) {
+        setNavState((prev) => ({
+          ...prev,
+          slideCustomState: {
+            ...prev.slideCustomState,
+            ...msg.patch,
+          },
+        }));
         return;
       }
 
-      if (type === 'notes:updated' || type === 'notes:update') {
+      if (type === 'notes:update') {
         const key = String(msg.key || '');
         if (!key) return;
         const text = String(msg.text ?? '');
-        setRoomState((prev) => {
-          const merged = { ...prev.customNotes, [key]: text };
+        setCustomNotes((prev) => {
+          const merged = { ...prev, [key]: text };
           if (typeof window !== 'undefined') {
             try {
               window.localStorage.setItem(NOTES_STORAGE_KEY, JSON.stringify(merged));
@@ -511,194 +724,655 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
               // Ignora quota
             }
           }
-          return { ...prev, customNotes: merged };
+          return merged;
         });
         return;
       }
 
-      if (type === 'timer:updated') {
-        if (msg.timer) {
-          const offset =
-            typeof msg.serverTime === 'number' ? msg.serverTime - Date.now() : undefined;
-          setRoomState((prev) => ({
-            ...prev,
-            timer: msg.timer,
-            serverTimeOffsetMs: offset ?? prev.serverTimeOffsetMs,
-          }));
-        }
+      if (type === 'timer:sync' && msg.timer) {
+        const offset = typeof msg.serverTime === 'number' ? msg.serverTime - Date.now() : 0;
+        setOverlayState((prev) => ({
+          ...prev,
+          timer: msg.timer as TimerState,
+          serverTimeOffsetMs: offset,
+        }));
       }
     },
     [applyRemoteCastCommand, applyRoomSnapshot]
   );
 
-  /**
-   * MOTOR 1 (GARANTIDO EM 100% DAS REDES E PROXIES):
-   * Loop contínuo de Long-Polling HTTP (/api/cast/poll) sempre ativo em qualquer tela aberta.
-   * Garante detecção instantânea de telas na rede e sincronização imediata mesmo quando WebSockets são bloqueados.
-   */
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
+  // Recalcula e difunde lista de presença quando este nó atua como Hub WebRTC da sala
+  const recomputeAndBroadcastHubPresence = useCallback(() => {
+    if (!isRoomHubRef.current) return;
+    const list: ClientPresence[] = [];
 
-    let cancelled = false;
-    let activeAbort: AbortController | null = null;
+    if (modeRef.current === 'presenter' || modeRef.current === 'screen') {
+      list.push({
+        clientId: clientIdRef.current,
+        role: modeRef.current,
+        deviceLabel: deviceProfileRef.current.label,
+        connectedAt: Date.now(),
+      });
+    }
 
-    const runPollLoop = async () => {
-      await registerPresenceHttp();
+    hubConnectionsRef.current.forEach(({ conn, meta }) => {
+      if (conn.open && meta.clientId !== clientIdRef.current) {
+        list.push(meta);
+      }
+    });
 
-      while (!cancelled) {
-        activeAbort = new AbortController();
+    setPresence(list);
+    const packet = { type: 'room:presence', presence: list };
+    hubConnectionsRef.current.forEach(({ conn }) => {
+      if (conn.open) {
         try {
-          const query = new URLSearchParams({
-            clientId: clientIdRef.current,
-            roomId: roomIdRef.current,
-            mode: modeRef.current,
-            sinceRoomVersion: String(roomVersionRef.current),
-            sinceDevicesVersion: String(devicesVersionRef.current),
-          });
-
-          const res = await fetch(`/api/cast/poll?${query.toString()}`, {
-            method: 'GET',
-            cache: 'no-store',
-            signal: activeAbort.signal,
-          });
-
-          if (!res.ok) {
-            throw new Error(`HTTP ${res.status}`);
-          }
-
-          const data = await res.json();
-          if (cancelled) break;
-
-          setConnected(true);
-
-          if (typeof data.devicesVersion === 'number') {
-            devicesVersionRef.current = data.devicesVersion;
-          }
-          if (Array.isArray(data.devices)) {
-            setNetworkDevices(
-              data.devices.filter((d: NetworkDeviceInfo) => d.clientId !== clientIdRef.current)
-            );
-          }
-
-          if (data.castCommand) {
-            applyRemoteCastCommand(data.castCommand as RemoteCastCommand);
-            continue;
-          }
-
-          if (data.roomState) {
-            applyRoomSnapshot(data.roomState, false);
-          }
-        } catch (err: any) {
-          if (cancelled || err?.name === 'AbortError') {
-            break;
-          }
-          setConnected(false);
-          await new Promise((r) => window.setTimeout(r, 900));
+          conn.send(packet);
+        } catch {
+          // Ignora
         }
+      }
+    });
+  }, []);
+
+  // ==========================================================================
+  // CANAL LOCAL INSTANTÂNEO (BroadcastChannel para múltiplas abas / janelas HDMI no mesmo PC)
+  // ==========================================================================
+  useEffect(() => {
+    if (typeof window === 'undefined' || !('BroadcastChannel' in window)) return;
+
+    const bc = new BroadcastChannel(`${PEER_PREFIX}-bc`);
+    bcRef.current = bc;
+
+    bc.onmessage = (ev) => {
+      const data = ev.data;
+      if (!data || data.__senderId === clientIdRef.current) return;
+
+      if (data.type === 'bc:ping') {
+        upsertDiscoveredDevice(data.fromDevice);
+        bc.postMessage({
+          type: 'bc:pong',
+          __senderId: clientIdRef.current,
+          device: buildMyDeviceInfo(),
+        });
+        return;
+      }
+
+      if (data.type === 'bc:pong' && data.device) {
+        upsertDiscoveredDevice(data.device);
+        return;
+      }
+
+      if (data.type === 'bc:summon' && data.command) {
+        const targets: string[] | 'ALL' = data.targetClientIds;
+        if (
+          targets === 'ALL' ||
+          (Array.isArray(targets) && targets.includes(clientIdRef.current))
+        ) {
+          applyRemoteCastCommand(data.command as RemoteCastCommand);
+        }
+        return;
+      }
+
+      if (data.__roomId && data.__roomId === roomIdRef.current) {
+        applyRealtimeRoomMessage(data);
       }
     };
 
-    runPollLoop();
+    // Anuncia esta aba imediatamente para outras abas abertas
+    bc.postMessage({
+      type: 'bc:ping',
+      __senderId: clientIdRef.current,
+      fromDevice: buildMyDeviceInfo(),
+    });
 
     return () => {
-      cancelled = true;
-      activeAbort?.abort();
+      bc.close();
+      bcRef.current = null;
     };
-  }, [mode, roomId, registerPresenceHttp, applyRemoteCastCommand, applyRoomSnapshot]);
+  }, [applyRealtimeRoomMessage, applyRemoteCastCommand, buildMyDeviceInfo, upsertDiscoveredDevice]);
 
-  /**
-   * MOTOR 2 (ACELERADOR LAN LOCAL + MULTI-ABAS):
-   * BroadcastChannel para abas locais + WebSocket oportunista em LAN direta (falha silenciosa caso proxy bloqueie WS).
-   */
+  // ==========================================================================
+  // MOTOR WEBRTC 1: SALA DE SINCRONIZAÇÃO EM TEMPO REAL (HUB / SPOKE AUTOMÁTICO)
+  // Funciona em Vercel estático, Google AI Studio (ais-dev ↔ ais-pre), 4G/5G e Wi-Fi!
+  // ==========================================================================
   useEffect(() => {
-    if (typeof window === 'undefined') return;
+    if (typeof window === 'undefined' || !p2pActivated) return;
 
     let cancelled = false;
+    let reconnectTimer: number | null = null;
+    const cleanRoom = sanitizePeerRoomToken(roomId);
+    const hubPeerId = `${PEER_PREFIX}-room-${cleanRoom}`;
 
-    if ('BroadcastChannel' in window) {
-      const bc = new BroadcastChannel('missao-nepal-lan-bc');
-      bc.onmessage = (ev) => {
-        const data = ev.data;
-        if (
-          data &&
-          data.__roomId === roomId &&
-          data.__senderId !== clientIdRef.current
-        ) {
-          applyRealtimeEvent(data);
+    const cleanupRoomPeers = () => {
+      if (reconnectTimer !== null) {
+        window.clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      hubConnectionsRef.current.forEach(({ conn }) => {
+        try {
+          conn.close();
+        } catch {
+          // Ignora
         }
-      };
-      bcRef.current = bc;
-    }
+      });
+      hubConnectionsRef.current.clear();
 
-    // Tenta WebSocket apenas quando fora de domínios Cloud Run proxy que desativam WS, ou tenta 1x sem floodar erros
-    const isAiStudioProxy = /\.run\.app$/i.test(window.location.hostname);
-    if (!isAiStudioProxy) {
-      try {
-        const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const socket = new WebSocket(`${proto}//${window.location.host}/ws-cast`);
-        wsRef.current = socket;
+      if (spokeConnRef.current) {
+        try {
+          spokeConnRef.current.close();
+        } catch {
+          // Ignora
+        }
+        spokeConnRef.current = null;
+      }
 
-        socket.onopen = () => {
-          if (cancelled) {
-            socket.close();
+      if (roomPeerRef.current) {
+        try {
+          roomPeerRef.current.destroy();
+        } catch {
+          // Ignora
+        }
+        roomPeerRef.current = null;
+      }
+      isRoomHubRef.current = false;
+    };
+
+    const connectAsSpoke = () => {
+      if (cancelled) return;
+      cleanupRoomPeers();
+
+      const spokePeer = new Peer(PEER_CONFIG);
+      roomPeerRef.current = spokePeer;
+      isRoomHubRef.current = false;
+
+      spokePeer.on('open', () => {
+        if (cancelled) return;
+        const conn = spokePeer.connect(hubPeerId, { reliable: true });
+        spokeConnRef.current = conn;
+
+        conn.on('open', () => {
+          if (cancelled) return;
+          setConnected(true);
+          const effectiveRole: 'presenter' | 'screen' =
+            modeRef.current === 'presenter' ? 'presenter' : 'screen';
+          conn.send({
+            type: 'peer:hello',
+            clientId: clientIdRef.current,
+            role: effectiveRole,
+            deviceLabel: deviceProfileRef.current.label,
+            initialPos:
+              modeRef.current === 'presenter'
+                ? {
+                    slideIndex: navStateRef.current.slideIndex,
+                    subStep: navStateRef.current.subStep,
+                  }
+                : undefined,
+          });
+        });
+
+        conn.on('data', (raw: any) => {
+          if (cancelled || !raw || typeof raw !== 'object') return;
+          applyRealtimeRoomMessage(raw as Record<string, any>);
+        });
+
+        conn.on('close', () => {
+          if (cancelled) return;
+          setConnected(false);
+          // Caso o Hub anterior tenha fechado/recarregado, renegocia liderança após breve jitter
+          reconnectTimer = window.setTimeout(() => {
+            bootRoomTopology();
+          }, 380 + Math.floor(Math.random() * 320));
+        });
+
+        conn.on('error', () => {
+          if (cancelled) return;
+          reconnectTimer = window.setTimeout(() => {
+            bootRoomTopology();
+          }, 700);
+        });
+      });
+
+      spokePeer.on('error', () => {
+        if (cancelled) return;
+        setConnected(false);
+        reconnectTimer = window.setTimeout(() => {
+          bootRoomTopology();
+        }, 900);
+      });
+    };
+
+    const bootRoomTopology = () => {
+      if (cancelled) return;
+      cleanupRoomPeers();
+
+      const candidateHub = new Peer(hubPeerId, PEER_CONFIG);
+      roomPeerRef.current = candidateHub;
+
+      candidateHub.on('open', () => {
+        if (cancelled) return;
+        isRoomHubRef.current = true;
+        setConnected(true);
+        recomputeAndBroadcastHubPresence();
+      });
+
+      candidateHub.on('connection', (conn) => {
+        if (cancelled) return;
+
+        conn.on('data', (raw: any) => {
+          if (cancelled || !raw || typeof raw !== 'object') return;
+          const msg = raw as Record<string, any>;
+
+          if (msg.type === 'peer:hello') {
+            const remoteRole: 'presenter' | 'screen' =
+              msg.role === 'presenter' ? 'presenter' : 'screen';
+            const remoteClientId = String(msg.clientId || conn.peer);
+
+            hubConnectionsRef.current.set(conn.peer, {
+              conn,
+              meta: {
+                clientId: remoteClientId,
+                role: remoteRole,
+                deviceLabel: String(msg.deviceLabel || 'Dispositivo Conectado'),
+                connectedAt: Date.now(),
+              },
+            });
+
+            // Se esta tela estava em modo standalone (ex: usuário escaneou o QR Code "QR para Celular" ou digitou o código),
+            // promove automaticamente esta tela para Telão ('screen') preservando o slide em que ela estava!
+            if (modeRef.current === 'standalone' && remoteRole === 'presenter') {
+              const localPos = clampPosition(
+                standaloneDeckPosRef.current.slideIndex,
+                standaloneDeckPosRef.current.subStep
+              );
+              modeRef.current = 'screen';
+              setMode('screen');
+              setIsBroadcastModalOpen(false);
+              navStateRef.current = {
+                ...navStateRef.current,
+                roomId: cleanRoom,
+                slideIndex: localPos.slideIndex,
+                subStep: localPos.subStep,
+              };
+              setNavState(navStateRef.current);
+            }
+
+            recomputeAndBroadcastHubPresence();
+
+            // Envia snapshot completo da sala imediatamente ao novo participante
+            try {
+              conn.send({
+                type: 'room:init',
+                state: buildFullRoomSnapshot(),
+              });
+            } catch {
+              // Ignora
+            }
             return;
           }
-          setConnected(true);
-          socket.send(
-            JSON.stringify({
-              type: 'room:join',
-              roomId,
-              clientId: clientIdRef.current,
-              role: mode,
-              deviceLabel: deviceProfileRef.current.label,
-              deviceType: deviceProfileRef.current.type,
-              screenResolution: deviceProfileRef.current.resolution,
-            })
-          );
-        };
 
-        socket.onmessage = (event) => {
-          try {
-            const parsed = JSON.parse(String(event.data));
-            applyRealtimeEvent(parsed);
-          } catch {
-            // Ignora
-          }
-        };
+          // Aplica no próprio Hub
+          applyRealtimeRoomMessage(msg);
 
-        socket.onclose = () => {
-          if (wsRef.current === socket) wsRef.current = null;
-        };
+          // Retransmite imediatamente para todos os outros peers da sala (ex: múltiplos telões + controles)
+          hubConnectionsRef.current.forEach(({ conn: peerConn }, peerKey) => {
+            if (peerKey !== conn.peer && peerConn.open) {
+              try {
+                peerConn.send(msg);
+              } catch {
+                // Ignora
+              }
+            }
+          });
+        });
 
-        socket.onerror = () => {
-          socket.close();
-        };
-      } catch {
-        // HTTP Long-Polling assume integralmente
-      }
-    }
+        conn.on('close', () => {
+          hubConnectionsRef.current.delete(conn.peer);
+          recomputeAndBroadcastHubPresence();
+        });
+
+        conn.on('error', () => {
+          hubConnectionsRef.current.delete(conn.peer);
+          recomputeAndBroadcastHubPresence();
+        });
+      });
+
+      candidateHub.on('error', (err: any) => {
+        if (cancelled) return;
+        if (err?.type === 'unavailable-id') {
+          // Já existe um Hub ativo para esta sala (ex: o Telão ou outro Apresentador): conecta como Spoke!
+          connectAsSpoke();
+          return;
+        }
+        setConnected(false);
+        reconnectTimer = window.setTimeout(() => {
+          bootRoomTopology();
+        }, 1200);
+      });
+    };
+
+    bootRoomTopology();
 
     return () => {
       cancelled = true;
-      if (wsRef.current) {
-        wsRef.current.close();
-        wsRef.current = null;
+      cleanupRoomPeers();
+    };
+  }, [
+    p2pActivated,
+    roomId,
+    applyRealtimeRoomMessage,
+    buildFullRoomSnapshot,
+    recomputeAndBroadcastHubPresence,
+  ]);
+
+  // Atualiza presença quando o próprio modo do Hub muda (standalone <-> screen <-> presenter)
+  useEffect(() => {
+    if (isRoomHubRef.current) {
+      recomputeAndBroadcastHubPresence();
+    } else if (spokeConnRef.current?.open) {
+      const effectiveRole: 'presenter' | 'screen' =
+        mode === 'presenter' ? 'presenter' : 'screen';
+      try {
+        spokeConnRef.current.send({
+          type: 'peer:hello',
+          clientId: clientIdRef.current,
+          role: effectiveRole,
+          deviceLabel: deviceProfileRef.current.label,
+        });
+      } catch {
+        // Ignora
       }
-      if (bcRef.current) {
-        bcRef.current.close();
-        bcRef.current = null;
+    }
+  }, [mode, recomputeAndBroadcastHubPresence]);
+
+  // ==========================================================================
+  // MOTOR WEBRTC 2: BEACON DE DESCOBERTA AUTOMÁTICA NA REDE WI-FI (SLOTS 0..5)
+  // Qualquer computador/TV/celular com a apresentação aberta anuncia presença no lobby
+  // do IP público da rede Wi-Fi e aceita comando direto de "Transmitir"!
+  // ==========================================================================
+  useEffect(() => {
+    if (typeof window === 'undefined' || !p2pActivated || !netHash) return;
+    if (mode === 'presenter') {
+      // Apresentadores escaneiam telas, não precisam ocupar slot de Telão receptor
+      if (beaconPeerRef.current) {
+        beaconPeerRef.current.destroy();
+        beaconPeerRef.current = null;
+        myBeaconIdRef.current = '';
+      }
+      return;
+    }
+
+    let cancelled = false;
+    let retryTimer: number | null = null;
+
+    const tryClaimSlot = (slotIndex: number) => {
+      if (cancelled) return;
+      if (slotIndex >= LAN_SLOT_COUNT) {
+        // Todos os 6 slots ocupados; tenta novamente em 8s
+        retryTimer = window.setTimeout(() => tryClaimSlot(0), 8000);
+        return;
+      }
+
+      const candidateId = `${PEER_PREFIX}-lan-${netHash}-s${slotIndex}`;
+      const p = new Peer(candidateId, PEER_CONFIG);
+      beaconPeerRef.current = p;
+
+      p.on('open', (id) => {
+        if (cancelled) {
+          p.destroy();
+          return;
+        }
+        myBeaconIdRef.current = id;
+      });
+
+      p.on('connection', (conn) => {
+        if (cancelled) return;
+        conn.on('data', (raw: any) => {
+          if (cancelled || !raw || typeof raw !== 'object') return;
+          const msg = raw as Record<string, any>;
+
+          if (msg.type === 'lan:ping') {
+            if (msg.fromDevice) {
+              upsertDiscoveredDevice(msg.fromDevice as NetworkDeviceInfo);
+            }
+            try {
+              conn.send({
+                type: 'lan:pong',
+                device: buildMyDeviceInfo(),
+              });
+            } catch {
+              // Ignora
+            }
+            return;
+          }
+
+          if (msg.type === 'lan:summon' && msg.command) {
+            try {
+              conn.send({
+                type: 'lan:ack',
+                clientId: clientIdRef.current,
+              });
+            } catch {
+              // Ignora
+            }
+            applyRemoteCastCommand(msg.command as RemoteCastCommand);
+          }
+        });
+      });
+
+      p.on('error', (err: any) => {
+        if (cancelled) return;
+        try {
+          p.destroy();
+        } catch {
+          // Ignora
+        }
+        if (err?.type === 'unavailable-id') {
+          tryClaimSlot(slotIndex + 1);
+        } else {
+          retryTimer = window.setTimeout(() => tryClaimSlot(0), 3000);
+        }
+      });
+    };
+
+    tryClaimSlot(0);
+
+    return () => {
+      cancelled = true;
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
+      if (beaconPeerRef.current) {
+        try {
+          beaconPeerRef.current.destroy();
+        } catch {
+          // Ignora
+        }
+        beaconPeerRef.current = null;
+        myBeaconIdRef.current = '';
       }
     };
-  }, [roomId, mode, applyRealtimeEvent]);
+  }, [
+    p2pActivated,
+    netHash,
+    mode,
+    applyRemoteCastCommand,
+    buildMyDeviceInfo,
+    upsertDiscoveredDevice,
+  ]);
 
-  // Envio garantido de ações discretas (Navegação, Cortina, Desfazer, Limpar, Notas, Cronômetro)
-  const sendDiscreteAction = useCallback((action: Record<string, unknown>) => {
+  // Garante um Peer de saída reutilizável para escaneamento rápido da rede Wi-Fi
+  const ensureScannerPeer = useCallback((): Promise<Peer> => {
+    return new Promise((resolve, reject) => {
+      const existing = scannerPeerRef.current;
+      if (existing && !existing.destroyed && !existing.disconnected && existing.id) {
+        resolve(existing);
+        return;
+      }
+      if (existing) {
+        try {
+          existing.destroy();
+        } catch {
+          // Ignora
+        }
+      }
+      const p = new Peer(PEER_CONFIG);
+      scannerPeerRef.current = p;
+      const timeout = window.setTimeout(() => {
+        reject(new Error('Peer scan timeout'));
+      }, 4500);
+      p.once('open', () => {
+        window.clearTimeout(timeout);
+        resolve(p);
+      });
+      p.once('error', (err) => {
+        window.clearTimeout(timeout);
+        reject(err);
+      });
+    });
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (scannerPeerRef.current) {
+        try {
+          scannerPeerRef.current.destroy();
+        } catch {
+          // Ignora
+        }
+        scannerPeerRef.current = null;
+      }
+    };
+  }, []);
+
+  /**
+   * Varre instantaneamente todas as telas abertas na mesma rede Wi-Fi (via slots WebRTC + BroadcastChannel)
+   */
+  const scanNetworkDevices = useCallback(async () => {
+    if (typeof window === 'undefined') return;
+    setIsScanningNetwork(true);
+
+    // 1. Ping instantâneo em abas locais
+    if (bcRef.current) {
+      try {
+        bcRef.current.postMessage({
+          type: 'bc:ping',
+          __senderId: clientIdRef.current,
+          fromDevice: buildMyDeviceInfo(),
+        });
+      } catch {
+        // Ignora
+      }
+    }
+
+    try {
+      const activeHash = netHashRef.current || (await resolvePublicNetworkHash());
+      netHashRef.current = activeHash;
+      if (!netHash) setNetHash(activeHash);
+
+      const scanner = await ensureScannerPeer();
+      const myDevice = buildMyDeviceInfo();
+
+      const probes: Promise<void>[] = [];
+      for (let s = 0; s < LAN_SLOT_COUNT; s++) {
+        const targetBeaconId = `${PEER_PREFIX}-lan-${activeHash}-s${s}`;
+        if (targetBeaconId === myBeaconIdRef.current) continue;
+
+        probes.push(
+          new Promise<void>((resolveProbe) => {
+            let settled = false;
+            const finish = () => {
+              if (settled) return;
+              settled = true;
+              resolveProbe();
+            };
+
+            const timer = window.setTimeout(() => {
+              try {
+                conn.close();
+              } catch {
+                // Ignora
+              }
+              finish();
+            }, 1600);
+
+            const conn = scanner.connect(targetBeaconId, { reliable: true });
+
+            conn.on('open', () => {
+              try {
+                conn.send({ type: 'lan:ping', fromDevice: myDevice });
+              } catch {
+                // Ignora
+              }
+            });
+
+            conn.on('data', (raw: any) => {
+              if (raw && typeof raw === 'object' && raw.type === 'lan:pong' && raw.device) {
+                upsertDiscoveredDevice({
+                  ...(raw.device as NetworkDeviceInfo),
+                  beaconPeerId: targetBeaconId,
+                });
+              }
+              window.clearTimeout(timer);
+              window.setTimeout(() => {
+                try {
+                  conn.close();
+                } catch {
+                  // Ignora
+                }
+              }, 80);
+              finish();
+            });
+
+            conn.on('error', () => {
+              window.clearTimeout(timer);
+              finish();
+            });
+
+            conn.on('close', () => {
+              window.clearTimeout(timer);
+              finish();
+            });
+          })
+        );
+      }
+
+      await Promise.all(probes);
+      syncDiscoveredStateFromMap();
+    } catch {
+      // Silencioso caso offline
+    } finally {
+      setIsScanningNetwork(false);
+    }
+  }, [buildMyDeviceInfo, ensureScannerPeer, netHash, syncDiscoveredStateFromMap, upsertDiscoveredDevice]);
+
+  // Varredura automática APENAS quando o modal de transmissão está aberto ou no Console sem telão conectado
+  // (Zero tráfego de varredura durante a apresentação normal dos slides!)
+  useEffect(() => {
+    const screensConnected = presence.some((p) => p.role === 'screen');
+    const shouldAutoScan =
+      isBroadcastModalOpen || (mode === 'presenter' && !screensConnected);
+
+    if (!shouldAutoScan) return;
+
+    setP2pActivated(true);
+    scanNetworkDevices();
+
+    const intervalMs = isBroadcastModalOpen ? 4500 : 7500;
+    const id = window.setInterval(() => {
+      scanNetworkDevices();
+    }, intervalMs);
+
+    return () => window.clearInterval(id);
+  }, [isBroadcastModalOpen, mode, presence, scanNetworkDevices]);
+
+  // ==========================================================================
+  // ENVIO DE EVENTOS DE SALA (DISCRETOS E CONTÍNUOS A ~45FPS)
+  // ==========================================================================
+  const transmitPacketNow = useCallback((packet: Record<string, unknown>) => {
     const activeRoom = roomIdRef.current;
 
     if (bcRef.current) {
       try {
         bcRef.current.postMessage({
-          ...action,
+          ...packet,
           __senderId: clientIdRef.current,
           __roomId: activeRoom,
         });
@@ -707,308 +1381,371 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       }
     }
 
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify(action));
-    }
-
-    pendingDiscreteActionsRef.current += 1;
-    fetch('/api/cast/action', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      keepalive: true,
-      body: JSON.stringify({
-        roomId: activeRoom,
-        clientId: clientIdRef.current,
-        action,
-      }),
-    })
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (data && typeof data.version === 'number') {
-          roomVersionRef.current = Math.max(roomVersionRef.current, data.version);
-          setConnected(true);
-        }
-      })
-      .catch(() => {
-        // Reconciliado no próximo poll
-      })
-      .finally(() => {
-        pendingDiscreteActionsRef.current = Math.max(
-          0,
-          pendingDiscreteActionsRef.current - 1
-        );
-      });
-  }, []);
-
-  // Envio coalescido de eventos contínuos (Laser Pointer, Spotlight, Traço de Desenho) sem empilhar requisições HTTP
-  const flushContinuousQueue = useCallback(async () => {
-    if (continuousInFlightRef.current) return;
-    continuousInFlightRef.current = true;
-
-    while (queuedContinuousActionRef.current) {
-      const nextAction = queuedContinuousActionRef.current;
-      queuedContinuousActionRef.current = null;
-      try {
-        const res = await fetch('/api/cast/action', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            roomId: roomIdRef.current,
-            clientId: clientIdRef.current,
-            action: nextAction,
-          }),
-        });
-        if (res.ok) {
-          const data = await res.json();
-          if (data && typeof data.version === 'number') {
-            roomVersionRef.current = Math.max(roomVersionRef.current, data.version);
+    if (isRoomHubRef.current) {
+      hubConnectionsRef.current.forEach(({ conn }) => {
+        if (conn.open) {
+          try {
+            conn.send(packet);
+          } catch {
+            // Ignora
           }
         }
+      });
+    } else if (spokeConnRef.current?.open) {
+      try {
+        spokeConnRef.current.send(packet);
       } catch {
-        // Ignora falha transitória de frame intermediário
+        // Ignora
       }
     }
-
-    continuousInFlightRef.current = false;
   }, []);
 
-  const sendContinuousAction = useCallback(
-    (action: Record<string, unknown>) => {
-      const activeRoom = roomIdRef.current;
+  const sendContinuousPacket = useCallback(
+    (packet: Record<string, unknown>) => {
+      const now = performance.now();
+      const elapsed = now - lastContinuousSentAtRef.current;
+
+      if (elapsed >= 22) {
+        lastContinuousSentAtRef.current = now;
+        pendingContinuousMsgRef.current = null;
+        if (trailingContinuousTimerRef.current !== null) {
+          window.clearTimeout(trailingContinuousTimerRef.current);
+          trailingContinuousTimerRef.current = null;
+        }
+        transmitPacketNow(packet);
+      } else {
+        pendingContinuousMsgRef.current = packet;
+        if (trailingContinuousTimerRef.current === null) {
+          trailingContinuousTimerRef.current = window.setTimeout(() => {
+            trailingContinuousTimerRef.current = null;
+            lastContinuousSentAtRef.current = performance.now();
+            const latest = pendingContinuousMsgRef.current;
+            pendingContinuousMsgRef.current = null;
+            if (latest) transmitPacketNow(latest);
+          }, 22 - elapsed);
+        }
+      }
+    },
+    [transmitPacketNow]
+  );
+
+  // ==========================================================================
+  // AÇÕES PÚBLICAS ESTÁVEIS (IDENTIDADE IMUTÁVEL)
+  // ==========================================================================
+  const openBroadcastModal = useCallback(() => {
+    setP2pActivated(true);
+    setIsBroadcastModalOpen(true);
+  }, []);
+
+  const closeBroadcastModal = useCallback(() => {
+    setIsBroadcastModalOpen(false);
+  }, []);
+
+  const reportStandaloneDeckPosition = useCallback((slideIndex: number, subStep: number) => {
+    standaloneDeckPosRef.current = { slideIndex, subStep };
+  }, []);
+
+  const startPresenting = useCallback(
+    (customRoomId?: string, initialPos?: { slideIndex: number; subStep: number }) => {
+      const targetRoom = sanitizePeerRoomToken(
+        customRoomId || roomIdRef.current || generateRoomCode()
+      );
+      const fallbackPos =
+        modeRef.current === 'standalone'
+          ? standaloneDeckPosRef.current
+          : {
+              slideIndex: navStateRef.current.slideIndex,
+              subStep: navStateRef.current.subStep,
+            };
+      const clamped = clampPosition(
+        initialPos?.slideIndex ?? fallbackPos.slideIndex,
+        initialPos?.subStep ?? fallbackPos.subStep
+      );
+
+      setP2pActivated(true);
+      roomIdRef.current = targetRoom;
+      modeRef.current = 'presenter';
+      setRoomId(targetRoom);
+      setMode('presenter');
+      setIsBroadcastModalOpen(false);
+
+      const nextNav: BroadcastNavState = {
+        ...navStateRef.current,
+        roomId: targetRoom,
+        slideIndex: clamped.slideIndex,
+        subStep: clamped.subStep,
+      };
+      navStateRef.current = nextNav;
+      setNavState(nextNav);
+      setOverlayState((prev) => ({ ...prev, pointer: null }));
+
+      transmitPacketNow({
+        type: 'nav:goto',
+        slideIndex: clamped.slideIndex,
+        subStep: clamped.subStep,
+        clearPointer: true,
+      });
+    },
+    [transmitPacketNow]
+  );
+
+  const castToDevices = useCallback(
+    async (
+      targetClientIds: string[] | 'ALL',
+      initialPos?: { slideIndex: number; subStep: number }
+    ) => {
+      const targetRoom = sanitizePeerRoomToken(roomIdRef.current || generateRoomCode());
+      const fallbackPos =
+        modeRef.current === 'standalone'
+          ? standaloneDeckPosRef.current
+          : {
+              slideIndex: navStateRef.current.slideIndex,
+              subStep: navStateRef.current.subStep,
+            };
+      const clamped = clampPosition(
+        initialPos?.slideIndex ?? fallbackPos.slideIndex,
+        initialPos?.subStep ?? fallbackPos.subStep
+      );
+
+      setP2pActivated(true);
+      roomIdRef.current = targetRoom;
+      modeRef.current = 'presenter';
+      setRoomId(targetRoom);
+      setMode('presenter');
+      setIsBroadcastModalOpen(false);
+
+      const nextNav: BroadcastNavState = {
+        ...navStateRef.current,
+        roomId: targetRoom,
+        slideIndex: clamped.slideIndex,
+        subStep: clamped.subStep,
+      };
+      navStateRef.current = nextNav;
+      setNavState(nextNav);
+      setOverlayState((prev) => ({ ...prev, pointer: null }));
+
+      transmitPacketNow({
+        type: 'nav:goto',
+        slideIndex: clamped.slideIndex,
+        subStep: clamped.subStep,
+        clearPointer: true,
+      });
+
+      const command: RemoteCastCommand = {
+        id: `cmd-${Date.now().toString(36)}`,
+        roomId: targetRoom,
+        targetMode: 'screen',
+        slideIndex: clamped.slideIndex,
+        subStep: clamped.subStep,
+        fromDeviceLabel: deviceProfileRef.current.label,
+        createdAt: Date.now(),
+      };
+
+      // 1. Aciona abas locais imediatamente via BroadcastChannel
       if (bcRef.current) {
         try {
           bcRef.current.postMessage({
-            ...action,
+            type: 'bc:summon',
             __senderId: clientIdRef.current,
-            __roomId: activeRoom,
+            targetClientIds,
+            command,
           });
         } catch {
           // Ignora
         }
       }
 
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify(action));
-      }
-
-      queuedContinuousActionRef.current = action;
-      flushContinuousQueue();
-    },
-    [flushContinuousQueue]
-  );
-
-  const openBroadcastModal = useCallback(() => {
-    refreshNetworkInfo();
-    setIsBroadcastModalOpen(true);
-  }, [refreshNetworkInfo]);
-
-  const closeBroadcastModal = useCallback(() => {
-    setIsBroadcastModalOpen(false);
-  }, []);
-
-  const startPresenting = useCallback(
-    (customRoomId?: string, initialPos?: { slideIndex: number; subStep: number }) => {
-      const targetRoom = (customRoomId || roomIdRef.current || generateRoomCode())
-        .trim()
-        .toUpperCase();
-      const clamped = initialPos
-        ? clampPosition(initialPos.slideIndex, initialPos.subStep)
-        : undefined;
-
-      roomIdRef.current = targetRoom;
-      modeRef.current = 'presenter';
-      setRoomId(targetRoom);
-      setMode('presenter');
-      setIsBroadcastModalOpen(false);
-
-      if (clamped) {
-        setRoomState((prev) => ({
-          ...prev,
-          roomId: targetRoom,
-          slideIndex: clamped.slideIndex,
-          subStep: clamped.subStep,
-          pointer: null,
-        }));
-      }
-
-      registerPresenceHttp({
-        targetMode: 'presenter',
-        targetRoomId: targetRoom,
-        initialSlideIndex: clamped?.slideIndex,
-        initialSubStep: clamped?.subStep,
+      // 2. Aciona telas na mesma rede Wi-Fi via WebRTC direto nos Beacons detectados
+      const targets: NetworkDeviceInfo[] = [];
+      discoveredMapRef.current.forEach((dev) => {
+        if (dev.clientId === clientIdRef.current) return;
+        if (targetClientIds === 'ALL' || targetClientIds.includes(dev.clientId)) {
+          targets.push(dev);
+        }
       });
-    },
-    [registerPresenceHttp]
-  );
 
-  /**
-   * Transmite diretamente para 1 ou todas as telas detectadas na rede com um único clique!
-   */
-  const castToDevices = useCallback(
-    async (
-      targetClientIds: string[] | 'ALL',
-      initialPos?: { slideIndex: number; subStep: number }
-    ) => {
-      const targetRoom = (roomIdRef.current || generateRoomCode()).trim().toUpperCase();
-      const clamped = clampPosition(
-        initialPos?.slideIndex ?? roomState.slideIndex,
-        initialPos?.subStep ?? roomState.subStep
-      );
-
-      roomIdRef.current = targetRoom;
-      modeRef.current = 'presenter';
-      setRoomId(targetRoom);
-      setMode('presenter');
-      setIsBroadcastModalOpen(false);
-      setRoomState((prev) => ({
-        ...prev,
-        roomId: targetRoom,
-        slideIndex: clamped.slideIndex,
-        subStep: clamped.subStep,
-        pointer: null,
-      }));
+      if (targets.length === 0) return;
 
       try {
-        const res = await fetch('/api/cast/summon', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            presenterClientId: clientIdRef.current,
-            presenterLabel: deviceProfileRef.current.label,
-            roomId: targetRoom,
-            targetClientIds,
-            slideIndex: clamped.slideIndex,
-            subStep: clamped.subStep,
-          }),
-        });
-        if (res.ok) {
-          const data = await res.json();
-          setConnected(true);
-          if (data.roomState) {
-            applyRoomSnapshot(data.roomState, false);
-          }
-          if (Array.isArray(data.devices)) {
-            setNetworkDevices(
-              data.devices.filter((d: NetworkDeviceInfo) => d.clientId !== clientIdRef.current)
-            );
-          }
-        }
+        const scanner = await ensureScannerPeer();
+        await Promise.all(
+          targets.map(
+            (dev) =>
+              new Promise<void>((resolveSummon) => {
+                if (!dev.beaconPeerId) {
+                  resolveSummon();
+                  return;
+                }
+                let done = false;
+                const finish = () => {
+                  if (done) return;
+                  done = true;
+                  resolveSummon();
+                };
+
+                const timer = window.setTimeout(() => {
+                  try {
+                    conn.close();
+                  } catch {
+                    // Ignora
+                  }
+                  finish();
+                }, 2500);
+
+                const conn = scanner.connect(dev.beaconPeerId, { reliable: true });
+
+                conn.on('open', () => {
+                  try {
+                    conn.send({ type: 'lan:summon', command });
+                  } catch {
+                    // Ignora
+                  }
+                });
+
+                conn.on('data', (raw: any) => {
+                  if (raw && typeof raw === 'object' && raw.type === 'lan:ack') {
+                    window.clearTimeout(timer);
+                    window.setTimeout(() => {
+                      try {
+                        conn.close();
+                      } catch {
+                        // Ignora
+                      }
+                    }, 120);
+                    finish();
+                  }
+                });
+
+                conn.on('error', () => {
+                  window.clearTimeout(timer);
+                  finish();
+                });
+              })
+          )
+        );
       } catch {
-        // Reconciliado no próximo poll
+        // Caso o beacon já tenha migrado para a sala, o roomPeer sincronizará automaticamente
       }
     },
-    [roomState.slideIndex, roomState.subStep, applyRoomSnapshot]
+    [ensureScannerPeer]
   );
 
-  const joinAsScreen = useCallback(
-    (targetRoomId: string) => {
-      const clean = targetRoomId.trim().toUpperCase();
-      if (!clean) return;
-      roomIdRef.current = clean;
-      modeRef.current = 'screen';
-      roomVersionRef.current = 0;
-      setRoomId(clean);
-      setMode('screen');
-      setIsBroadcastModalOpen(false);
-      registerPresenceHttp({ targetMode: 'screen', targetRoomId: clean });
-    },
-    [registerPresenceHttp]
-  );
+  const joinAsScreen = useCallback((targetRoomId: string) => {
+    const clean = sanitizePeerRoomToken(targetRoomId);
+    if (!clean) return;
+    setP2pActivated(true);
+    roomIdRef.current = clean;
+    modeRef.current = 'screen';
+    setRoomId(clean);
+    setMode('screen');
+    setIsBroadcastModalOpen(false);
+    setNavState((prev) => ({ ...prev, roomId: clean }));
+  }, []);
 
-  const joinAsPresenter = useCallback(
-    (targetRoomId: string) => {
-      const clean = targetRoomId.trim().toUpperCase();
-      if (!clean) return;
-      roomIdRef.current = clean;
-      modeRef.current = 'presenter';
-      roomVersionRef.current = 0;
-      setRoomId(clean);
-      setMode('presenter');
-      setIsBroadcastModalOpen(false);
-      registerPresenceHttp({ targetMode: 'presenter', targetRoomId: clean });
-    },
-    [registerPresenceHttp]
-  );
+  const joinAsPresenter = useCallback((targetRoomId: string) => {
+    const clean = sanitizePeerRoomToken(targetRoomId);
+    if (!clean) return;
+    setP2pActivated(true);
+    roomIdRef.current = clean;
+    modeRef.current = 'presenter';
+    setRoomId(clean);
+    setMode('presenter');
+    setIsBroadcastModalOpen(false);
+    setNavState((prev) => ({ ...prev, roomId: clean }));
+  }, []);
 
   const leaveBroadcast = useCallback(() => {
     modeRef.current = 'standalone';
     setMode('standalone');
     setIsBroadcastModalOpen(false);
-    registerPresenceHttp({ targetMode: 'standalone', targetRoomId: roomIdRef.current });
-  }, [registerPresenceHttp]);
+    setOverlayState((prev) => ({
+      ...prev,
+      blackout: false,
+      pointer: null,
+      spotlight: null,
+    }));
+  }, []);
 
   const goToPosition = useCallback(
     (slideIndex: number, subStep: number) => {
       const pos = clampPosition(slideIndex, subStep);
-      setRoomState((prev) => ({
-        ...prev,
+      roomVersionRef.current += 1;
+      const nextNav: BroadcastNavState = {
+        ...navStateRef.current,
         slideIndex: pos.slideIndex,
         subStep: pos.subStep,
-        pointer: null,
-      }));
-      sendDiscreteAction({
+      };
+      navStateRef.current = nextNav;
+      setNavState(nextNav);
+      setOverlayState((prev) => (prev.pointer ? { ...prev, pointer: null } : prev));
+
+      transmitPacketNow({
         type: 'nav:goto',
         slideIndex: pos.slideIndex,
         subStep: pos.subStep,
         clearPointer: true,
       });
     },
-    [sendDiscreteAction]
+    [transmitPacketNow]
   );
 
   const stepForwardBroadcast = useCallback(() => {
-    const next = getNextPosition(roomState.slideIndex, roomState.subStep);
+    const curr = navStateRef.current;
+    const next = getNextPosition(curr.slideIndex, curr.subStep);
     if (next) {
       goToPosition(next.slideIndex, next.subStep);
     }
-  }, [roomState.slideIndex, roomState.subStep, goToPosition]);
+  }, [goToPosition]);
 
   const stepBackwardBroadcast = useCallback(() => {
-    const prev = getPrevPosition(roomState.slideIndex, roomState.subStep);
+    const curr = navStateRef.current;
+    const prev = getPrevPosition(curr.slideIndex, curr.subStep);
     if (prev) {
       goToPosition(prev.slideIndex, prev.subStep);
     }
-  }, [roomState.slideIndex, roomState.subStep, goToPosition]);
+  }, [goToPosition]);
 
   const nextSlideBroadcast = useCallback(() => {
-    if (roomState.slideIndex + 1 < PRESENTATION_SLIDES.length) {
-      goToPosition(roomState.slideIndex + 1, 0);
+    const curr = navStateRef.current;
+    if (curr.slideIndex + 1 < PRESENTATION_SLIDES.length) {
+      goToPosition(curr.slideIndex + 1, 0);
     }
-  }, [roomState.slideIndex, goToPosition]);
+  }, [goToPosition]);
 
   const prevSlideBroadcast = useCallback(() => {
-    if (roomState.slideIndex > 0) {
-      goToPosition(roomState.slideIndex - 1, 0);
+    const curr = navStateRef.current;
+    if (curr.slideIndex > 0) {
+      goToPosition(curr.slideIndex - 1, 0);
     }
-  }, [roomState.slideIndex, goToPosition]);
+  }, [goToPosition]);
 
   const setBlackout = useCallback(
     (blackout: boolean) => {
-      setRoomState((prev) => ({ ...prev, blackout }));
-      sendDiscreteAction({ type: 'stage:blackout', blackout });
+      setOverlayState((prev) => ({ ...prev, blackout }));
+      transmitPacketNow({ type: 'stage:blackout', blackout });
     },
-    [sendDiscreteAction]
+    [transmitPacketNow]
   );
 
   const setSpotlight = useCallback(
     (spotlight: SpotlightState | null) => {
-      setRoomState((prev) => ({ ...prev, spotlight }));
+      setOverlayState((prev) => ({ ...prev, spotlight }));
       if (!spotlight) {
-        queuedContinuousActionRef.current = null;
-        sendDiscreteAction({ type: 'stage:spotlight', spotlight: null });
+        pendingContinuousMsgRef.current = null;
+        transmitPacketNow({ type: 'stage:spotlight', spotlight: null });
       } else {
-        sendContinuousAction({ type: 'stage:spotlight', spotlight });
+        sendContinuousPacket({ type: 'stage:spotlight', spotlight });
       }
     },
-    [sendDiscreteAction, sendContinuousAction]
+    [transmitPacketNow, sendContinuousPacket]
   );
 
   const emitPointer = useCallback(
     (active: boolean, x: number, y: number, color = '#dc143c') => {
-      const pointerObj = active
+      const pointerObj: PointerState | null = active
         ? { active: true, x, y, color, updatedAt: Date.now() }
         : null;
-      setRoomState((prev) => ({ ...prev, pointer: pointerObj }));
+      setOverlayState((prev) => ({ ...prev, pointer: pointerObj }));
 
       const payload = {
         type: 'pointer:move',
@@ -1019,18 +1756,18 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       };
 
       if (!active) {
-        queuedContinuousActionRef.current = null;
-        sendDiscreteAction(payload);
+        pendingContinuousMsgRef.current = null;
+        transmitPacketNow(payload);
       } else {
-        sendContinuousAction(payload);
+        sendContinuousPacket(payload);
       }
     },
-    [sendDiscreteAction, sendContinuousAction]
+    [transmitPacketNow, sendContinuousPacket]
   );
 
   const upsertStroke = useCallback(
     (slideIndex: number, stroke: DrawingStroke) => {
-      setRoomState((prev) => {
+      setOverlayState((prev) => {
         const list = [...(prev.drawingsBySlide[slideIndex] || [])];
         const idx = list.findIndex((s) => s.id === stroke.id);
         if (idx >= 0) {
@@ -1047,18 +1784,18 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         };
       });
 
-      sendContinuousAction({
+      sendContinuousPacket({
         type: 'draw:upsert',
         slideIndex,
         stroke,
       });
     },
-    [sendContinuousAction]
+    [sendContinuousPacket]
   );
 
   const undoStroke = useCallback(
     (slideIndex: number) => {
-      setRoomState((prev) => {
+      setOverlayState((prev) => {
         const list = [...(prev.drawingsBySlide[slideIndex] || [])];
         list.pop();
         return {
@@ -1069,56 +1806,56 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           },
         };
       });
-      sendDiscreteAction({ type: 'draw:undo', slideIndex });
+      transmitPacketNow({ type: 'draw:undo', slideIndex });
     },
-    [sendDiscreteAction]
+    [transmitPacketNow]
   );
 
   const clearStrokes = useCallback(
     (slideIndex: number) => {
-      setRoomState((prev) => ({
+      setOverlayState((prev) => ({
         ...prev,
         drawingsBySlide: {
           ...prev.drawingsBySlide,
           [slideIndex]: [],
         },
       }));
-      sendDiscreteAction({ type: 'draw:clear', slideIndex });
+      transmitPacketNow({ type: 'draw:clear', slideIndex });
     },
-    [sendDiscreteAction]
+    [transmitPacketNow]
   );
 
   const updateSlideCustomState = useCallback(
     (patch: Partial<SlideCustomState>) => {
-      setRoomState((prev) => ({
+      setNavState((prev) => ({
         ...prev,
         slideCustomState: {
           ...prev.slideCustomState,
           ...patch,
         },
       }));
-      sendDiscreteAction({ type: 'slide:custom', patch });
+      transmitPacketNow({ type: 'slide:custom', patch });
     },
-    [sendDiscreteAction]
+    [transmitPacketNow]
   );
 
   const getNoteForStep = useCallback(
     (slideIndex: number, subStep: number): string => {
       const key = makeNoteKey(slideIndex, subStep);
-      const custom = roomState.customNotes[key];
+      const custom = customNotes[key];
       if (custom !== undefined) return custom;
       const slide = PRESENTATION_SLIDES[slideIndex];
       const step = slide?.steps[subStep] ?? slide?.steps[0];
       return step?.defaultNotes ?? '';
     },
-    [roomState.customNotes]
+    [customNotes]
   );
 
   const updateNoteForStep = useCallback(
     (slideIndex: number, subStep: number, text: string) => {
       const key = makeNoteKey(slideIndex, subStep);
-      setRoomState((prev) => {
-        const merged = { ...prev.customNotes, [key]: text };
+      setCustomNotes((prev) => {
+        const merged = { ...prev, [key]: text };
         if (typeof window !== 'undefined') {
           try {
             window.localStorage.setItem(NOTES_STORAGE_KEY, JSON.stringify(merged));
@@ -1126,82 +1863,136 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
             // Ignora
           }
         }
-        return { ...prev, customNotes: merged };
+        return merged;
       });
-      sendDiscreteAction({ type: 'notes:update', key, text });
+      transmitPacketNow({ type: 'notes:update', key, text });
     },
-    [sendDiscreteAction]
+    [transmitPacketNow]
   );
 
   const timerAction = useCallback(
     (action: 'start' | 'pause' | 'reset') => {
       const now = Date.now();
-      setRoomState((prev) => {
-        if (action === 'start' && !prev.timer.running) {
-          return {
-            ...prev,
-            timer: { running: true, elapsedMs: prev.timer.elapsedMs, startedAt: now },
-          };
-        }
-        if (action === 'pause' && prev.timer.running) {
-          const delta = prev.timer.startedAt ? now - prev.timer.startedAt : 0;
-          return {
-            ...prev,
-            timer: {
-              running: false,
-              elapsedMs: prev.timer.elapsedMs + Math.max(0, delta),
-              startedAt: null,
-            },
-          };
-        }
-        if (action === 'reset') {
-          return {
-            ...prev,
-            timer: { running: false, elapsedMs: 0, startedAt: null },
-          };
-        }
-        return prev;
+      let nextTimer: TimerState = overlayStateRef.current.timer;
+
+      if (action === 'start' && !nextTimer.running) {
+        nextTimer = { running: true, elapsedMs: nextTimer.elapsedMs, startedAt: now };
+      } else if (action === 'pause' && nextTimer.running) {
+        const delta = nextTimer.startedAt ? now - nextTimer.startedAt : 0;
+        nextTimer = {
+          running: false,
+          elapsedMs: nextTimer.elapsedMs + Math.max(0, delta),
+          startedAt: null,
+        };
+      } else if (action === 'reset') {
+        nextTimer = { running: false, elapsedMs: 0, startedAt: null };
+      }
+
+      setOverlayState((prev) => ({
+        ...prev,
+        timer: nextTimer,
+        serverTimeOffsetMs: 0,
+      }));
+
+      transmitPacketNow({
+        type: 'timer:sync',
+        timer: nextTimer,
+        serverTime: now,
       });
-      sendDiscreteAction({ type: 'timer:action', action });
     },
-    [sendDiscreteAction]
+    [transmitPacketNow]
   );
 
-  const value: BroadcastContextValue = {
-    myClientId: clientIdRef.current,
-    mode,
-    roomId,
-    connected,
-    roomState,
-    networkDevices,
-    isBroadcastModalOpen,
-    networkInfo,
-    openBroadcastModal,
-    closeBroadcastModal,
-    startPresenting,
-    castToDevices,
-    joinAsScreen,
-    joinAsPresenter,
-    leaveBroadcast,
-    goToPosition,
-    stepForwardBroadcast,
-    stepBackwardBroadcast,
-    nextSlideBroadcast,
-    prevSlideBroadcast,
-    setBlackout,
-    setSpotlight,
-    emitPointer,
-    upsertStroke,
-    undoStroke,
-    clearStrokes,
-    updateSlideCustomState,
-    getNoteForStep,
-    updateNoteForStep,
-    timerAction,
-    refreshNetworkInfo,
-  };
+  const navContextValue = useMemo<BroadcastContextValue>(
+    () => ({
+      myClientId: clientIdRef.current,
+      mode,
+      roomId,
+      roomState: navState,
+      openBroadcastModal,
+      closeBroadcastModal,
+      reportStandaloneDeckPosition,
+      startPresenting,
+      castToDevices,
+      joinAsScreen,
+      joinAsPresenter,
+      leaveBroadcast,
+      goToPosition,
+      stepForwardBroadcast,
+      stepBackwardBroadcast,
+      nextSlideBroadcast,
+      prevSlideBroadcast,
+      setBlackout,
+      setSpotlight,
+      emitPointer,
+      upsertStroke,
+      undoStroke,
+      clearStrokes,
+      updateSlideCustomState,
+      updateNoteForStep,
+      timerAction,
+      scanNetworkDevices,
+    }),
+    [
+      mode,
+      roomId,
+      navState,
+      openBroadcastModal,
+      closeBroadcastModal,
+      reportStandaloneDeckPosition,
+      startPresenting,
+      castToDevices,
+      joinAsScreen,
+      joinAsPresenter,
+      leaveBroadcast,
+      goToPosition,
+      stepForwardBroadcast,
+      stepBackwardBroadcast,
+      nextSlideBroadcast,
+      prevSlideBroadcast,
+      setBlackout,
+      setSpotlight,
+      emitPointer,
+      upsertStroke,
+      undoStroke,
+      clearStrokes,
+      updateSlideCustomState,
+      updateNoteForStep,
+      timerAction,
+      scanNetworkDevices,
+    ]
+  );
 
-  return <BroadcastContext.Provider value={value}>{children}</BroadcastContext.Provider>;
+  const discoveryContextValue = useMemo<BroadcastDiscoveryContextValue>(
+    () => ({
+      connected,
+      isBroadcastModalOpen,
+      isScanningNetwork,
+      networkDevices,
+      presence,
+      customNotes,
+      getNoteForStep,
+    }),
+    [
+      connected,
+      isBroadcastModalOpen,
+      isScanningNetwork,
+      networkDevices,
+      presence,
+      customNotes,
+      getNoteForStep,
+    ]
+  );
+
+  return (
+    <BroadcastContext.Provider value={navContextValue}>
+      <BroadcastOverlayContext.Provider value={overlayState}>
+        <BroadcastDiscoveryContext.Provider value={discoveryContextValue}>
+          {children}
+        </BroadcastDiscoveryContext.Provider>
+      </BroadcastOverlayContext.Provider>
+    </BroadcastContext.Provider>
+  );
 };
 
 export function useBroadcast(): BroadcastContextValue {
@@ -1214,4 +2005,20 @@ export function useBroadcast(): BroadcastContextValue {
 
 export function useOptionalBroadcast(): BroadcastContextValue | null {
   return useContext(BroadcastContext);
+}
+
+export function useBroadcastOverlay(): BroadcastOverlayContextValue {
+  const ctx = useContext(BroadcastOverlayContext);
+  if (!ctx) {
+    throw new Error('useBroadcastOverlay must be used within BroadcastProvider');
+  }
+  return ctx;
+}
+
+export function useBroadcastDiscovery(): BroadcastDiscoveryContextValue {
+  const ctx = useContext(BroadcastDiscoveryContext);
+  if (!ctx) {
+    throw new Error('useBroadcastDiscovery must be used within BroadcastProvider');
+  }
+  return ctx;
 }

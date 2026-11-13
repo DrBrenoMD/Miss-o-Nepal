@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   ChevronLeft,
   ChevronRight,
@@ -26,8 +26,12 @@ import {
   LayoutGrid,
   FileText,
 } from 'lucide-react';
-import { useBroadcast } from './BroadcastContext';
-import { AnnotationTool } from './types';
+import {
+  useBroadcast,
+  useBroadcastOverlay,
+  useBroadcastDiscovery,
+} from './BroadcastContext';
+import { AnnotationTool, DrawingStroke, TimerState } from './types';
 import {
   PRESENTATION_SLIDES,
   getNextPosition,
@@ -65,12 +69,74 @@ function formatDurationMs(ms: number): string {
   return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
 }
 
+/**
+ * Isola o tick de 500ms do cronômetro e relógio em um subcomponente mínimo,
+ * impedindo que os palcos 16:9 (Tela Atual e Próxima Etapa) re-renderizem a cada meio segundo!
+ */
+const PresenterTimerBadge: React.FC<{
+  timer: TimerState;
+  serverTimeOffsetMs: number;
+  onTimerAction: (action: 'start' | 'pause' | 'reset') => void;
+}> = React.memo(({ timer, serverTimeOffsetMs, onTimerAction }) => {
+  const [nowTick, setNowTick] = useState<number>(() => Date.now());
+
+  useEffect(() => {
+    const id = window.setInterval(() => setNowTick(Date.now()), 500);
+    return () => window.clearInterval(id);
+  }, []);
+
+  const liveElapsedMs = useMemo(() => {
+    if (!timer.running || !timer.startedAt) {
+      return timer.elapsedMs;
+    }
+    const approxServerNow = nowTick + serverTimeOffsetMs;
+    return timer.elapsedMs + Math.max(0, approxServerNow - timer.startedAt);
+  }, [timer, serverTimeOffsetMs, nowTick]);
+
+  const localClockLabel = useMemo(() => {
+    return new Date(nowTick).toLocaleTimeString('pt-BR', {
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  }, [nowTick]);
+
+  return (
+    <div className="flex items-center gap-1.5 bg-slate-900/90 border border-slate-800 rounded-xl px-2.5 py-1">
+      <span className="font-mono text-sm sm:text-base font-extrabold text-white tabular-nums px-1">
+        {formatDurationMs(liveElapsedMs)}
+      </span>
+      <button
+        type="button"
+        onClick={() => onTimerAction(timer.running ? 'pause' : 'start')}
+        aria-label={timer.running ? 'Pausar cronômetro' : 'Iniciar cronômetro'}
+        className="w-8 h-8 rounded-lg bg-slate-800 hover:bg-slate-700 flex items-center justify-center text-slate-200 transition-colors cursor-pointer"
+      >
+        {timer.running ? (
+          <Pause className="w-3.5 h-3.5 text-amber-400" />
+        ) : (
+          <Play className="w-3.5 h-3.5 text-emerald-400" />
+        )}
+      </button>
+      <button
+        type="button"
+        onClick={() => onTimerAction('reset')}
+        aria-label="Zerar cronômetro"
+        className="w-8 h-8 rounded-lg bg-slate-800 hover:bg-slate-700 flex items-center justify-center text-slate-400 hover:text-white transition-colors cursor-pointer"
+      >
+        <RotateCcw className="w-3.5 h-3.5" />
+      </button>
+      <span className="hidden md:inline text-slate-700 px-1">|</span>
+      <span className="hidden md:inline font-mono text-xs font-semibold text-slate-400 tabular-nums pr-1">
+        {localClockLabel}
+      </span>
+    </div>
+  );
+});
+
 export const PresenterConsole: React.FC = () => {
   const {
     roomId,
-    connected,
     roomState,
-    networkDevices,
     openBroadcastModal,
     castToDevices,
     leaveBroadcast,
@@ -86,10 +152,12 @@ export const PresenterConsole: React.FC = () => {
     undoStroke,
     clearStrokes,
     updateSlideCustomState,
-    getNoteForStep,
     updateNoteForStep,
     timerAction,
   } = useBroadcast();
+
+  const overlay = useBroadcastOverlay();
+  const { networkDevices, presence, getNoteForStep } = useBroadcastDiscovery();
 
   const [activeTool, setActiveTool] = useState<AnnotationTool>('laser');
   const [brushColor, setBrushColor] = useState<string>('#dc143c');
@@ -97,23 +165,16 @@ export const PresenterConsole: React.FC = () => {
   const [notesFontSize, setNotesFontSize] = useState<number>(16);
   const [isEditingNotes, setIsEditingNotes] = useState<boolean>(false);
   const [mobilePanel, setMobilePanel] = useState<'notes' | 'tools' | 'slides'>('notes');
-  const [nowTick, setNowTick] = useState<number>(() => Date.now());
 
-  // Atualiza cronômetro e relógio local a cada 500ms
+  // Ao desligar a ferramenta Lupa (Spotlight) ou Laser, limpa a máscara nos telões
   useEffect(() => {
-    const id = window.setInterval(() => setNowTick(Date.now()), 500);
-    return () => window.clearInterval(id);
-  }, []);
-
-  // Ao desligar a ferramenta Lupa (Spotlight), limpa a máscara nos telões
-  useEffect(() => {
-    if (activeTool !== 'spotlight' && roomState.spotlight?.active) {
+    if (activeTool !== 'spotlight' && overlay.spotlight?.active) {
       setSpotlight(null);
     }
-    if (activeTool !== 'laser' && roomState.pointer?.active) {
+    if (activeTool !== 'laser' && overlay.pointer?.active) {
       emitPointer(false, 0, 0, brushColor);
     }
-  }, [activeTool]);
+  }, [activeTool, brushColor, emitPointer, overlay.pointer?.active, overlay.spotlight?.active, setSpotlight]);
 
   const { slideIndex, subStep } = roomState;
   const currentMeta = useMemo(() => getStepMeta(slideIndex, subStep), [slideIndex, subStep]);
@@ -125,24 +186,16 @@ export const PresenterConsole: React.FC = () => {
   );
   const linearStats = useMemo(() => getLinearStepStats(slideIndex, subStep), [slideIndex, subStep]);
 
-  const currentStrokes = roomState.drawingsBySlide[slideIndex] || [];
-  const screensCount = roomState.presence.filter((p) => p.role === 'screen').length;
+  const currentStrokes = overlay.drawingsBySlide[slideIndex] || [];
+  const screensCount = presence.filter((p) => p.role === 'screen').length;
+  const castableCount = networkDevices.filter((d) => d.mode !== 'presenter').length;
 
-  // Cálculo em tempo real do cronômetro sincronizado
-  const liveElapsedMs = useMemo(() => {
-    if (!roomState.timer.running || !roomState.timer.startedAt) {
-      return roomState.timer.elapsedMs;
-    }
-    const approxServerNow = nowTick + roomState.serverTimeOffsetMs;
-    return roomState.timer.elapsedMs + Math.max(0, approxServerNow - roomState.timer.startedAt);
-  }, [roomState.timer, roomState.serverTimeOffsetMs, nowTick]);
-
-  const localClockLabel = useMemo(() => {
-    return new Date(nowTick).toLocaleTimeString('pt-BR', {
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-  }, [nowTick]);
+  const handleUpsertStrokeForSlide = useCallback(
+    (st: DrawingStroke) => {
+      upsertStroke(slideIndex, st);
+    },
+    [slideIndex, upsertStroke]
+  );
 
   // Atalhos de teclado no Console do Apresentador em Desktop (setas, Espaço, B = Cortina, L = Laser)
   useEffect(() => {
@@ -162,7 +215,7 @@ export const PresenterConsole: React.FC = () => {
         stepBackwardBroadcast();
       } else if (e.key === 'b' || e.key === 'B') {
         e.preventDefault();
-        setBlackout(!roomState.blackout);
+        setBlackout(!overlay.blackout);
       } else if (e.key === 'l' || e.key === 'L') {
         e.preventDefault();
         setActiveTool((prev) => (prev === 'laser' ? 'none' : 'laser'));
@@ -170,7 +223,7 @@ export const PresenterConsole: React.FC = () => {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [isEditingNotes, stepForwardBroadcast, stepBackwardBroadcast, setBlackout, roomState.blackout]);
+  }, [isEditingNotes, stepForwardBroadcast, stepBackwardBroadcast, setBlackout, overlay.blackout]);
 
   const currentNoteText = getNoteForStep(slideIndex, subStep);
 
@@ -213,72 +266,44 @@ export const PresenterConsole: React.FC = () => {
             </span>
           </button>
 
-          {screensCount === 0 &&
-            networkDevices.some((d) => d.mode !== 'presenter') && (
-              <button
-                type="button"
-                onClick={() => castToDevices('ALL', { slideIndex, subStep })}
-                className="min-h-[40px] px-3 py-1.5 rounded-xl bg-[#dc143c] hover:bg-[#b81032] text-white font-sans text-xs font-extrabold flex items-center gap-1.5 shadow-md transition-colors cursor-pointer shrink-0 animate-pulse"
-                title="Transmitir imediatamente para as telas abertas detectadas na rede"
-              >
-                <span>
-                  Conectar{' '}
-                  {networkDevices.filter((d) => d.mode !== 'presenter').length} Tela(s)
-                </span>
-              </button>
-            )}
+          {screensCount === 0 && castableCount > 0 && (
+            <button
+              type="button"
+              onClick={() => castToDevices('ALL', { slideIndex, subStep })}
+              className="min-h-[40px] px-3 py-1.5 rounded-xl bg-[#dc143c] hover:bg-[#b81032] text-white font-sans text-xs font-extrabold flex items-center gap-1.5 shadow-md transition-colors cursor-pointer shrink-0 animate-pulse"
+              title="Transmitir imediatamente para as telas abertas detectadas na mesma rede Wi-Fi"
+            >
+              <span>Conectar {castableCount} Tela(s)</span>
+            </button>
+          )}
 
           <span className="hidden xl:inline font-display text-xs font-extrabold uppercase tracking-widest text-slate-400 truncate">
             Console do Apresentador · Missão Nepal
           </span>
         </div>
 
-        {/* Centro: Cronômetro Sincronizado + Relógio */}
-        <div className="flex items-center gap-1.5 bg-slate-900/90 border border-slate-800 rounded-xl px-2.5 py-1">
-          <span className="font-mono text-sm sm:text-base font-extrabold text-white tabular-nums px-1">
-            {formatDurationMs(liveElapsedMs)}
-          </span>
-          <button
-            type="button"
-            onClick={() => timerAction(roomState.timer.running ? 'pause' : 'start')}
-            aria-label={roomState.timer.running ? 'Pausar cronômetro' : 'Iniciar cronômetro'}
-            className="w-8 h-8 rounded-lg bg-slate-800 hover:bg-slate-700 flex items-center justify-center text-slate-200 transition-colors cursor-pointer"
-          >
-            {roomState.timer.running ? (
-              <Pause className="w-3.5 h-3.5 text-amber-400" />
-            ) : (
-              <Play className="w-3.5 h-3.5 text-emerald-400" />
-            )}
-          </button>
-          <button
-            type="button"
-            onClick={() => timerAction('reset')}
-            aria-label="Zerar cronômetro"
-            className="w-8 h-8 rounded-lg bg-slate-800 hover:bg-slate-700 flex items-center justify-center text-slate-400 hover:text-white transition-colors cursor-pointer"
-          >
-            <RotateCcw className="w-3.5 h-3.5" />
-          </button>
-          <span className="hidden md:inline text-slate-700 px-1">|</span>
-          <span className="hidden md:inline font-mono text-xs font-semibold text-slate-400 tabular-nums pr-1">
-            {localClockLabel}
-          </span>
-        </div>
+        {/* Centro: Cronômetro Sincronizado + Relógio Isolado */}
+        <PresenterTimerBadge
+          timer={overlay.timer}
+          serverTimeOffsetMs={overlay.serverTimeOffsetMs}
+          onTimerAction={timerAction}
+        />
 
         {/* Direita: Cortina (Blackout) & Sair */}
         <div className="flex items-center gap-2 shrink-0">
           <button
             type="button"
-            onClick={() => setBlackout(!roomState.blackout)}
+            onClick={() => setBlackout(!overlay.blackout)}
             className={`min-h-[40px] px-3 py-1.5 rounded-xl font-sans text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap ${
-              roomState.blackout
+              overlay.blackout
                 ? 'bg-[#dc143c] text-white shadow-lg'
                 : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700'
             }`}
             title="Escurecer/Exibir telões receptores (Atalho: B)"
           >
-            {roomState.blackout ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
+            {overlay.blackout ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
             <span className="hidden sm:inline">
-              {roomState.blackout ? 'Retomar Telão' : 'Cortina'}
+              {overlay.blackout ? 'Retomar Telão' : 'Cortina'}
             </span>
           </button>
 
@@ -332,33 +357,32 @@ export const PresenterConsole: React.FC = () => {
               slideIndex={slideIndex}
               subStep={subStep}
               instanceId="presenter-live-stage"
-              isPreview={false}
+              isPreview={true}
               overlay={
                 <LiveAnnotationOverlay
                   strokes={currentStrokes}
-                  pointer={roomState.pointer}
-                  spotlight={roomState.spotlight}
-                  blackout={roomState.blackout}
+                  pointer={overlay.pointer}
+                  spotlight={overlay.spotlight}
+                  blackout={overlay.blackout}
                   variant="presenter"
                   interactiveTool={activeTool}
                   activeColor={brushColor}
                   activeWidth={brushWidth}
                   onPointerSignal={emitPointer}
                   onSpotlightSignal={setSpotlight}
-                  onUpsertStroke={(st) => upsertStroke(slideIndex, st)}
+                  onUpsertStroke={handleUpsertStrokeForSlide}
                 />
               }
             />
           </div>
 
-          {/* Barra de Ferramentas de Pointer & Desenho (Sempre visível em Desktop, ou aba Ferramentas em Mobile) */}
+          {/* Barra de Ferramentas de Pointer & Desenho */}
           <div
             className={`${
               mobilePanel === 'tools' ? 'flex' : 'hidden lg:flex'
             } flex-col gap-2.5 rounded-2xl bg-[#111827] border border-slate-800 p-3`}
           >
             <div className="flex items-center justify-between gap-2 flex-wrap">
-              {/* Ferramentas */}
               <div className="flex items-center gap-1 flex-wrap">
                 {toolButtons.map((btn) => {
                   const isSelected = activeTool === btn.id;
@@ -380,7 +404,6 @@ export const PresenterConsole: React.FC = () => {
                 })}
               </div>
 
-              {/* Desfazer e Limpar */}
               <div className="flex items-center gap-1.5">
                 <button
                   type="button"
@@ -524,7 +547,7 @@ export const PresenterConsole: React.FC = () => {
             </div>
           </div>
 
-          {/* Seletor de Abas Mobile (Anotações & Próxima | Desenho & Laser | Todos os Slides) */}
+          {/* Seletor de Abas Mobile */}
           <div className="grid grid-cols-3 gap-1.5 p-1 rounded-xl bg-[#111827] border border-slate-800 lg:hidden">
             <button
               type="button"
@@ -617,7 +640,7 @@ export const PresenterConsole: React.FC = () => {
             )}
           </div>
 
-          {/* 2. ANOTAÇÕES DO APRESENTADOR (COM TAMANHO DE FONTE E EDIÇÃO AO VIVO) */}
+          {/* 2. ANOTAÇÕES DO APRESENTADOR */}
           <div
             className={`${
               mobilePanel === 'slides' ? 'hidden lg:flex' : 'flex'
@@ -687,7 +710,7 @@ export const PresenterConsole: React.FC = () => {
             )}
           </div>
 
-          {/* 3. LISTA RÁPIDA DE SLIDES E MARCOS (Visível na aba Mobile "Slides" ou faixa inferior) */}
+          {/* 3. LISTA RÁPIDA DE SLIDES E MARCOS (Mobile) */}
           {mobilePanel === 'slides' && (
             <div className="lg:hidden rounded-2xl bg-[#111827] border border-slate-800 p-3 space-y-2">
               <div className="font-sans text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
@@ -750,7 +773,6 @@ export const PresenterConsole: React.FC = () => {
           3. BARRA INFERIOR DE NAVEGAÇÃO ERGONÔMICA + SELETOR DE SLIDES (DESKTOP)
          ===================================================================== */}
       <footer className="bg-[#111827] border-t border-slate-800 px-3 sm:px-5 py-2.5 shrink-0 space-y-2">
-        {/* Faixa de Navegação Direta de Slides & Sub-Etapas em Desktop */}
         <div className="hidden lg:flex items-center gap-1.5 overflow-x-auto pb-1">
           {PRESENTATION_SLIDES.map((s) => {
             const isCurrentSlide = s.slideIndex === slideIndex;
@@ -795,7 +817,7 @@ export const PresenterConsole: React.FC = () => {
           })}
         </div>
 
-        {/* Controles Principais de Avanço e Retrocesso (Zona Natural do Polegar no Celular) */}
+        {/* Controles Principais de Avanço e Retrocesso */}
         <div className="grid grid-cols-12 gap-2 sm:gap-3 items-center">
           <button
             type="button"

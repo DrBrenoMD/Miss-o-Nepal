@@ -1,7 +1,7 @@
 import React, { useRef, useState, useEffect, useMemo } from 'react';
 import { LayoutGroup } from 'framer-motion';
 import { SlideContext } from 'spectacle';
-import { StageInstanceProvider } from './BroadcastContext';
+import { StageInstanceProvider } from '../StageInstanceContext';
 import { Slide01CoverContent } from '../Slide01Cover';
 import { Slide02GeographyContent } from '../Slide02Geography';
 import { Slide02AEconomyHDIContent } from '../Slide02AEconomyHDI';
@@ -20,7 +20,7 @@ export interface SlideStagePreviewProps {
   className?: string;
 }
 
-function renderSlideByIndex(slideIndex: number) {
+const MemoizedStageSlide: React.FC<{ slideIndex: number }> = React.memo(({ slideIndex }) => {
   switch (slideIndex) {
     case 0:
       return <Slide01CoverContent />;
@@ -41,81 +41,76 @@ function renderSlideByIndex(slideIndex: number) {
     default:
       return <Slide01CoverContent />;
   }
-}
+});
 
-export const SlideStagePreview: React.FC<SlideStagePreviewProps> = ({
-  slideIndex,
-  subStep,
-  instanceId,
-  isPreview = true,
-  overlay,
-  className = '',
-}) => {
-  const wrapperRef = useRef<HTMLDivElement | null>(null);
-  const [scale, setScale] = useState<number>(0.35);
+export const SlideStagePreview: React.FC<SlideStagePreviewProps> = React.memo(
+  ({ slideIndex, subStep, instanceId, isPreview = true, overlay, className = '' }) => {
+    const wrapperRef = useRef<HTMLDivElement | null>(null);
+    const [scale, setScale] = useState<number>(0.35);
 
-  useEffect(() => {
-    const el = wrapperRef.current;
-    if (!el) return;
+    useEffect(() => {
+      const el = wrapperRef.current;
+      if (!el) return;
 
-    const updateScale = () => {
-      const w = el.clientWidth;
-      if (w > 0) {
-        setScale(w / 1920);
-      }
-    };
+      const updateScale = () => {
+        const w = el.clientWidth;
+        if (w > 0) {
+          setScale(w / 1920);
+        }
+      };
 
-    updateScale();
-    const ro = new ResizeObserver(updateScale);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
+      updateScale();
+      const ro = new ResizeObserver(updateScale);
+      ro.observe(el);
+      return () => ro.disconnect();
+    }, []);
 
-  const mockSlideContext = useMemo(
-    () => ({
-      immediate: true,
-      slideId: `${instanceId}-slide-${slideIndex}`,
-      isSlideActive: true,
-      activationThresholds: {},
-      activeStepIndex: subStep,
-    }),
-    [instanceId, slideIndex, subStep]
-  );
+    const mockSlideContext = useMemo(
+      () => ({
+        immediate: true,
+        slideId: `${instanceId}-slide-${slideIndex}`,
+        isSlideActive: true,
+        activationThresholds: {},
+        activeStepIndex: subStep,
+      }),
+      [instanceId, slideIndex, subStep]
+    );
 
-  const stageConfig = useMemo(
-    () => ({
-      isPreview,
-      forcedSubStep: subStep,
-      disableSlideTapAdvance: true,
-    }),
-    [isPreview, subStep]
-  );
+    const stageConfig = useMemo(
+      () => ({
+        isPreview,
+        forcedSubStep: subStep,
+        disableSlideTapAdvance: true,
+      }),
+      [isPreview, subStep]
+    );
 
-  return (
-    <div
-      ref={wrapperRef}
-      className={`relative w-full aspect-video bg-[#f4f2eb] overflow-hidden select-none ${className}`}
-    >
+    return (
       <div
-        style={{
-          width: '1920px',
-          height: '1080px',
-          transform: `scale(${scale})`,
-          transformOrigin: 'top left',
-        }}
-        className="pointer-events-none absolute top-0 left-0 overflow-hidden bg-[#f4f2eb]"
+        ref={wrapperRef}
+        className={`relative w-full aspect-video bg-[#f4f2eb] overflow-hidden select-none ${className}`}
       >
-        <LayoutGroup id={`stage-group-${instanceId}-${slideIndex}`}>
-          <SlideContext.Provider value={mockSlideContext as any}>
-            <StageInstanceProvider value={stageConfig}>
-              {renderSlideByIndex(slideIndex)}
-            </StageInstanceProvider>
-          </SlideContext.Provider>
-        </LayoutGroup>
-      </div>
+        <div
+          style={{
+            width: '1920px',
+            height: '1080px',
+            transform: `scale(${scale})`,
+            transformOrigin: 'top left',
+          }}
+          className="pointer-events-none absolute top-0 left-0 overflow-hidden bg-[#f4f2eb]"
+        >
+          <LayoutGroup id={`stage-group-${instanceId}-${slideIndex}`}>
+            <SlideContext.Provider value={mockSlideContext as any}>
+              <StageInstanceProvider value={stageConfig}>
+                <MemoizedStageSlide slideIndex={slideIndex} />
+              </StageInstanceProvider>
+            </SlideContext.Provider>
+          </LayoutGroup>
+        </div>
 
-      {/* Camada interativa de Laser Pointer / Desenhos / Cortina alinhada sobre o palco 16:9 */}
-      {overlay}
-    </div>
-  );
-};
+        {/* Camada interativa de Laser Pointer / Desenhos / Cortina alinhada sobre o palco 16:9 */}
+        {overlay}
+      </div>
+    );
+  }
+);

@@ -60,6 +60,7 @@ export interface ClientPresence {
 
 export interface NetworkDeviceInfo {
   clientId: string;
+  beaconPeerId?: string;
   deviceLabel: string;
   deviceType: 'desktop' | 'mobile' | 'tv';
   screenResolution: string;
@@ -80,27 +81,24 @@ export interface RemoteCastCommand {
   createdAt: number;
 }
 
-export interface RoomSyncState {
+export interface BroadcastNavState {
   roomId: string;
-  version: number;
   slideIndex: number;
   subStep: number;
+  slideCustomState: SlideCustomState;
+}
+
+export interface BroadcastOverlayState {
   blackout: boolean;
   spotlight: SpotlightState | null;
   pointer: PointerState | null;
   drawingsBySlide: Record<number, DrawingStroke[]>;
-  slideCustomState: SlideCustomState;
-  customNotes: Record<string, string>;
   timer: TimerState;
-  presence: ClientPresence[];
   serverTimeOffsetMs: number;
 }
 
-export interface NetworkInfoResponse {
-  port: number;
-  lanIps: string[];
-  lanUrls: string[];
-  originUrl: string;
-  sharedAppUrl: string | null;
-  activeRoomsCount: number;
+export interface RoomSyncState extends BroadcastNavState, BroadcastOverlayState {
+  version: number;
+  customNotes: Record<string, string>;
+  presence: ClientPresence[];
 }

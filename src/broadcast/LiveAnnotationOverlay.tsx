@@ -150,7 +150,7 @@ export interface LiveAnnotationOverlayProps {
   onUpsertStroke?: (stroke: DrawingStroke) => void;
 }
 
-export const LiveAnnotationOverlay: React.FC<LiveAnnotationOverlayProps> = ({
+export const LiveAnnotationOverlay: React.FC<LiveAnnotationOverlayProps> = React.memo(({
   strokes,
   pointer,
   spotlight,
@@ -398,4 +398,4 @@ export const LiveAnnotationOverlay: React.FC<LiveAnnotationOverlayProps> = ({
       )}
     </div>
   );
-};
+});
