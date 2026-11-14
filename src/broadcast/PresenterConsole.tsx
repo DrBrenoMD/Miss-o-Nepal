@@ -332,7 +332,8 @@ export const PresenterConsole: React.FC = () => {
           <div className="flex items-center justify-between gap-2 px-1">
             <div className="min-w-0">
               <div className="font-sans text-[11px] font-bold uppercase tracking-wider text-rose-400">
-                Ao Vivo nos Telões · Slide {currentMeta.slide.numberLabel}/08 · Passo{' '}
+                Ao Vivo nos Telões · Slide {currentMeta.slide.numberLabel}/
+                {String(PRESENTATION_SLIDES.length).padStart(2, '0')} · Passo{' '}
                 {linearStats.currentLinearStep}/{linearStats.totalLinearSteps}
               </div>
               <h1 className="font-display text-sm sm:text-base font-extrabold text-white truncate">
@@ -577,7 +578,7 @@ export const PresenterConsole: React.FC = () => {
               }`}
             >
               <LayoutGrid className="w-4 h-4" />
-              <span>Slides (8)</span>
+              <span>Slides ({PRESENTATION_SLIDES.length})</span>
             </button>
           </div>
         </div>
@@ -631,7 +632,8 @@ export const PresenterConsole: React.FC = () => {
             ) : (
               <div className="w-full py-8 rounded-xl bg-slate-900/80 border border-slate-800 flex flex-col items-center justify-center text-center px-4">
                 <span className="font-display text-sm font-extrabold uppercase tracking-wider text-slate-300">
-                  Última Etapa Alcançada (18 / 18)
+                  Última Etapa Alcançada ({linearStats.totalLinearSteps} /{' '}
+                  {linearStats.totalLinearSteps})
                 </span>
                 <span className="font-sans text-xs text-slate-500 mt-1">
                   Você está no encerramento da apresentação Missão Nepal

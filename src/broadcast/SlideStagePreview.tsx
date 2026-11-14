@@ -10,6 +10,11 @@ import { Slide02CDailyCustomsContent } from '../Slide02CDailyCustoms';
 import { Slide02DStreetsMobilityContent } from '../Slide02DStreetsMobility';
 import { Slide02ERitualsFestivalsContent } from '../Slide02ERitualsFestivals';
 import { Slide03TimelineContent } from '../Slide03Timeline';
+import { Slide04TheCallContent } from '../Slide04TheCall';
+import { Slide05TheJourneyContent } from '../Slide05TheJourney';
+import { Slide06TheGroupContent } from '../Slide06TheGroup';
+import { Slide07CulturalIntegrationContent } from '../Slide07CulturalIntegration';
+import { Slide08BargachhiReceptionContent } from '../Slide08BargachhiReception';
 
 export interface SlideStagePreviewProps {
   slideIndex: number;
@@ -38,6 +43,16 @@ const MemoizedStageSlide: React.FC<{ slideIndex: number }> = React.memo(({ slide
       return <Slide02ERitualsFestivalsContent />;
     case 7:
       return <Slide03TimelineContent />;
+    case 8:
+      return <Slide04TheCallContent />;
+    case 9:
+      return <Slide05TheJourneyContent />;
+    case 10:
+      return <Slide06TheGroupContent />;
+    case 11:
+      return <Slide07CulturalIntegrationContent />;
+    case 12:
+      return <Slide08BargachhiReceptionContent />;
     default:
       return <Slide01CoverContent />;
   }

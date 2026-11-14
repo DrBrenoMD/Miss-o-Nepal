@@ -230,7 +230,194 @@ export const PRESENTATION_SLIDES: SlideMeta[] = [
         defaultNotes:
           '• O gráfico abre agora no Panorama Completo de 2.600 anos: de zero absoluto por milênios até a faixa estimada de 1,0 milhão a 1,5 milhão+ de cristãos (3% a 5% da população)!\n' +
           '• Diante dos protestos juvenis (2025) e das graves enchentes (2026), igrejas locais e missões humanitárias têm sido linha de frente em resgate, alimento e reconstrução.\n' +
-          '• Encerramento: convide o grupo à reflexão, intercessão e engajamento prático com a igreja sofredora e resiliente no Nepal.',
+          '• Prepare a transição para o próximo slide ("O Chamado"): conecte a realidade histórica do Nepal com o testemunho pessoal da viagem e do chamado missionário.',
+      },
+    ],
+  },
+  {
+    slideIndex: 8,
+    numberLabel: '09',
+    shortTitle: 'O Chamado',
+    fullTitle: 'O Chamado · Missão Nepal',
+    steps: [
+      {
+        subStep: 0,
+        shortLabel: 'O Chamado',
+        title: 'O Chamado · Testemunho & Propósito',
+        defaultNotes:
+          '• Compartilhe a história pessoal por trás desta foto e como nasceu o chamado para a Missão Nepal.\n' +
+          '• Destaque os passos de fé, as conexões e confirmações ao longo da jornada e como a comunidade jovem pode fazer parte desse propósito.',
+      },
+    ],
+  },
+  {
+    slideIndex: 9,
+    numberLabel: '10',
+    shortTitle: 'A Viagem (3D)',
+    fullTitle: 'A Viagem · +60 Horas Só de Ida, 2 Ônibus, 11 Voos & 7 Países',
+    steps: [
+      {
+        subStep: 0,
+        shortLabel: 'CGB ➔ BSB (Ônibus)',
+        title: 'Etapa 1/7 · Ônibus de Cuiabá (MT) a Brasília (DF)',
+        defaultNotes:
+          '• Início da jornada: saindo de Cuiabá (MT) de ônibus rodoviário até Brasília (DF) (~1.133 km, cerca de 18h de estrada).\n' +
+          '• Destaque os números globais sempre visíveis: foram mais de 60 horas só de ida, e no total da viagem foram 2 ônibus e 11 voos passando por 7 países diferentes.',
+      },
+      {
+        subStep: 1,
+        shortLabel: 'BSB ➔ LIS (Voo 1)',
+        title: 'Etapa 2/7 · Avião de Brasília a Lisboa (Portugal)',
+        defaultNotes:
+          '• Em Brasília começa a maratona aérea: primeiro voo internacional cruzando o Oceano Atlântico até Lisboa, Portugal (~7.295 km).',
+      },
+      {
+        subStep: 2,
+        shortLabel: 'LIS ➔ AMS (Voo 2)',
+        title: 'Etapa 3/7 · Avião de Lisboa a Amsterdam (Holanda)',
+        defaultNotes:
+          '• Conexão europeia: voo subindo de Lisboa para Amsterdam, na Holanda (~1.848 km), preparando a travessia rumo à Ásia.',
+      },
+      {
+        subStep: 3,
+        shortLabel: 'AMS ➔ BOM (Voo 3)',
+        title: 'Etapa 4/7 · Avião de Amsterdam a Mumbai (Índia)',
+        defaultNotes:
+          '• Longa travessia intercontinental cortando a Europa, Oriente Médio e Mar Arábico até pousar em Mumbai, na Índia (~6.854 km).',
+      },
+      {
+        subStep: 4,
+        shortLabel: 'BOM ➔ KTM (Voo 4)',
+        title: 'Etapa 5/7 · Avião de Mumbai a Kathmandu (Nepal)',
+        defaultNotes:
+          '• Subindo da costa oeste da Índia em direção à Cordilheira do Himalaia até pousar no vale de Kathmandu, capital do Nepal (~1.590 km).',
+      },
+      {
+        subStep: 5,
+        shortLabel: 'KTM ➔ BIR (Voo 5)',
+        title: 'Etapa 6/7 · Avião de Kathmandu a Biratnagar (Sudeste do Nepal)',
+        defaultNotes:
+          '• Trecho final da ida: voo doméstico paralelo ao Himalaia de Kathmandu até Biratnagar, nas planícies do Terai (~240 km), completando mais de 60 horas só de ida!',
+      },
+      {
+        subStep: 6,
+        shortLabel: 'Rota Completa (+60h)',
+        title: 'Etapa 7/7 · Panorama Global: +60h Só de Ida · 2 Ônibus · 11 Voos · 7 Países',
+        defaultNotes:
+          '• Visão panorâmica 3D de toda a rota intercontinental conectada de Cuiabá a Biratnagar.\n' +
+          '• Resumo da expedição completa (ida e volta): mais de 60 horas só de ida, 2 ônibus, 11 voos e 7 países diferentes.',
+      },
+    ],
+  },
+  {
+    slideIndex: 10,
+    numberLabel: '11',
+    shortTitle: 'O Grupo',
+    fullTitle: 'O Grupo · Equipe da Missão Nepal',
+    steps: [
+      {
+        subStep: 0,
+        shortLabel: 'O Grupo',
+        title: 'O Grupo · Companheiros de Missão no Nepal',
+        defaultNotes:
+          '• Apresente a equipe que compartilhou essa jornada missionária no Nepal.\n' +
+          '• Conte sobre a chegada no aeroporto, a união do grupo e o papel de cada integrante durante a missão.',
+      },
+    ],
+  },
+  {
+    slideIndex: 11,
+    numberLabel: '12',
+    shortTitle: 'Integração & Turismo',
+    fullTitle: 'Os 2 Primeiros Dias · Integração Cultural & Turismo',
+    steps: [
+      {
+        subStep: 0,
+        shortLabel: 'Mosaico (5 Fotos)',
+        title: 'Etapa 1/6 · Visão Geral dos 2 Primeiros Dias em Kathmandu',
+        defaultNotes:
+          '• Após mais de 60 horas de viagem, os 2 primeiros dias no Nepal foram dedicados à adaptação de fuso horário, integração da equipe e imersão na cultura local.\n' +
+          '• Ao avançar pelos próximos passos, cada uma das 5 fotos se expande em tela cheia com sua história.',
+      },
+      {
+        subStep: 1,
+        shortLabel: 'Reunião no Terraço',
+        title: 'Etapa 2/6 · Alinhamento & Integração sob Bandeiras de Oração',
+        defaultNotes:
+          '• Reunião da equipe no terraço em Kathmandu para orientações práticas e comunhão.\n' +
+          '• Destaque o chapéu tradicional nepalês ("Dhaka Topi") e o ambiente típico dos terraços da capital.',
+      },
+      {
+        subStep: 2,
+        shortLabel: 'Thakali Dal Bhat',
+        title: 'Etapa 3/6 · Experiência Gastronômica: O Tradicional Dal Bhat',
+        defaultNotes:
+          '• Primeiro contato real com o prato nacional nepalês na bandeja de metal (Thali): arroz, lentilha (Dal), curry, verduras refogadas, picles picantes e Papadum.',
+      },
+      {
+        subStep: 3,
+        shortLabel: 'Templos em Pagode',
+        title: 'Etapa 4/6 · Arquitetura Histórica & Escadarias dos Templos',
+        defaultNotes:
+          '• Caminhada pelas praças históricas observando os templos hindus em estilo pagode de múltiplos telhados e como os moradores locais convivem ao redor deles.',
+      },
+      {
+        subStep: 4,
+        shortLabel: 'Swayambhunath',
+        title: 'Etapa 5/6 · Santuários, Cachoeira & Bandeiras de Oração',
+        defaultNotes:
+          '• Visita aos santuários do vale de Kathmandu para compreender a espiritualidade local e a cosmovisão budista/hindu antes das ações missionárias.',
+      },
+      {
+        subStep: 5,
+        shortLabel: 'Cotidiano & Tika',
+        title: 'Etapa 6/6 · Cultura Viva nas Ruas: O Cão com a Tika Vermelha',
+        defaultNotes:
+          '• Curiosidade cotidiana nas ruas repletas de motonetas: até os cães recebem a marca vermelha da Tika na testa, refletindo as tradições religiosas nepalesas (como o festival Kukur Tihar).',
+      },
+    ],
+  },
+  {
+    slideIndex: 12,
+    numberLabel: '13',
+    shortTitle: 'Bargachhi & Recepção',
+    fullTitle: 'Viagem para Bargachhi (Biratnagar) & Recepção Noturna',
+    steps: [
+      {
+        subStep: 0,
+        shortLabel: 'Visão Geral',
+        title: 'Etapa 1/5 · Chegada a Bargachhi & Recepção com Cânticos e Flores',
+        defaultNotes:
+          '• Ortografia verificada: Bargachhi (também grafada localmente como Bhargachhi), área no setor norte de Biratnagar, Distrito de Morang (Província de Koshi, planícies do Terai).\n' +
+          '• Mostre o vídeo principal à esquerda (cânticos em nepalês e colares de flores amarelas Sayapatri Mala) e explique o voo noturno de Kathmandu até Biratnagar na Buddha Air.',
+      },
+      {
+        subStep: 1,
+        shortLabel: 'Vídeo · Cânticos',
+        title: 'Etapa 2/5 · Vídeo da Recepção com Colares de Flores (Marigold)',
+        defaultNotes:
+          '• Destaque em tela cheia do vídeo da acolhida noturna: duas fileiras de moradores e membros da igreja local cantando hinos de boas-vindas e coroando a equipe com guirlandas de flores.',
+      },
+      {
+        subStep: 2,
+        shortLabel: 'Vídeo · Portão',
+        title: 'Etapa 3/5 · Entrada pelo Portão do Complexo em Bargachhi',
+        defaultNotes:
+          '• Segundo ângulo em vídeo mostrando o momento exato da chegada noturna ao portão da base missionária após o deslocamento desde o aeroporto de Biratnagar.',
+      },
+      {
+        subStep: 3,
+        shortLabel: 'Voo Buddha Air',
+        title: 'Etapa 4/5 · Embarque Noturno no ATR-72 (Kathmandu ➔ Biratnagar)',
+        defaultNotes:
+          '• Foto da equipe diante do turboélice da Buddha Air (9N-AMU) antes de decolar para o leste do Nepal, rumo às planícies quentes próximas à fronteira com a Índia.',
+      },
+      {
+        subStep: 4,
+        shortLabel: 'Base & Moto',
+        title: 'Etapa 5/5 · Complexo Missionário em Bargachhi & Deslocamento Noturno',
+        defaultNotes:
+          '• Imagens do pátio da base missionária (com a picape levando as malas) e do deslocamento de moto à noite pela região de Morang.',
       },
     ],
   },

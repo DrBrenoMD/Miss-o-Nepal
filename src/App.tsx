@@ -15,6 +15,12 @@ import { Slide02CDailyCustomsContent } from './Slide02CDailyCustoms';
 import { Slide02DStreetsMobilityContent } from './Slide02DStreetsMobility';
 import { Slide02ERitualsFestivalsContent } from './Slide02ERitualsFestivals';
 import { Slide03TimelineContent } from './Slide03Timeline';
+import { Slide04TheCallContent } from './Slide04TheCall';
+import { Slide05TheJourneyContent } from './Slide05TheJourney';
+import { Slide06TheGroupContent } from './Slide06TheGroup';
+import { Slide07CulturalIntegrationContent } from './Slide07CulturalIntegration';
+import { Slide08BargachhiReceptionContent } from './Slide08BargachhiReception';
+import { getSlideStepCount } from './broadcast/presentationMetadata';
 import {
   BroadcastProvider,
   useBroadcast,
@@ -162,7 +168,7 @@ const DeckOverlayTemplate: React.FC<{
   // Reporta posição local do Deck via Ref (zero re-renders!) para iniciar transmissão no slide atual
   useEffect(() => {
     if (mode === 'standalone') {
-      const hasInternalSteps = activeSlideIndex === 1 || activeSlideIndex === 7;
+      const hasInternalSteps = getSlideStepCount(activeSlideIndex) > 1;
       const normalizedSubStep = hasInternalSteps
         ? Math.max(0, (typeof activeStepIndex === 'number' ? activeStepIndex : -1) + 1)
         : 0;
@@ -426,6 +432,31 @@ function AppPresentationShell() {
                   {/* SLIDE 08: LINHA DO TEMPO HISTÓRICA & AVANÇO DO CRISTIANISMO (8 ETAPAS + GRÁFICO) */}
                   <Slide backgroundColor="#f4f2eb" padding={0}>
                     <Slide03TimelineContent />
+                  </Slide>
+
+                  {/* SLIDE 09: O CHAMADO */}
+                  <Slide backgroundColor="#f4f2eb" padding={0}>
+                    <Slide04TheCallContent />
+                  </Slide>
+
+                  {/* SLIDE 10: A VIAGEM (MAPA-MÚNDI 3D: ÔNIBUS + 5 VOOS DE IDA · +60H · 2 ÔNIBUS · 11 VOOS · 7 PAÍSES) */}
+                  <Slide backgroundColor="#f4f2eb" padding={0}>
+                    <Slide05TheJourneyContent />
+                  </Slide>
+
+                  {/* SLIDE 11: O GRUPO */}
+                  <Slide backgroundColor="#f4f2eb" padding={0}>
+                    <Slide06TheGroupContent />
+                  </Slide>
+
+                  {/* SLIDE 12: OS 2 PRIMEIROS DIAS (INTEGRAÇÃO CULTURAL & TURISMO — 5 FOTOS REAIS) */}
+                  <Slide backgroundColor="#f4f2eb" padding={0}>
+                    <Slide07CulturalIntegrationContent />
+                  </Slide>
+
+                  {/* SLIDE 13: VIAGEM PARA BARGACHHI & RECEPÇÃO NOTURNA */}
+                  <Slide backgroundColor="#f4f2eb" padding={0}>
+                    <Slide08BargachhiReceptionContent />
                   </Slide>
                 </Deck>
               </div>

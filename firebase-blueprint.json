@@ -137,7 +137,7 @@
         },
         "slideIndex": {
           "type": "integer",
-          "description": "Active zero-based slide index (0 to 7)."
+          "description": "Active zero-based slide index (0 to 60)."
         },
         "subStep": {
           "type": "integer",
