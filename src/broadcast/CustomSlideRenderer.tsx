@@ -24,6 +24,7 @@ import {
 import { OfficialNepalFlag } from '../OfficialNepalFlag';
 import { Slide01CoverContent } from '../Slide01Cover';
 import { Slide01BScriptureContent } from '../Slide01BScripture';
+import { Slide01CPhotoShowcaseContent } from '../Slide01CPhotoShowcase';
 import { Slide02GeographyContent } from '../Slide02Geography';
 import { Slide02AEconomyHDIContent } from '../Slide02AEconomyHDI';
 import { Slide02BLanguagesCastesContent } from '../Slide02BLanguagesCastes';
@@ -31,6 +32,8 @@ import { Slide02CDailyCustomsContent } from '../Slide02CDailyCustoms';
 import { Slide02DStreetsMobilityContent } from '../Slide02DStreetsMobility';
 import { Slide02ERitualsFestivalsContent } from '../Slide02ERitualsFestivals';
 import { Slide03TimelineContent } from '../Slide03Timeline';
+import { Slide10PianistAndDriverContent } from '../Slide10PianistAndDriver';
+import { Slide11PhilippiansScriptureContent } from '../Slide11PhilippiansScripture';
 import {
   BuiltinSlideBanner,
   CustomCanvasBlock,
@@ -1203,6 +1206,15 @@ export const ManagedSlideStageContent: React.FC<{
       break;
     case 8:
       builtinNode = <Slide01BScriptureContent />;
+      break;
+    case 9:
+      builtinNode = <Slide01CPhotoShowcaseContent />;
+      break;
+    case 11:
+      builtinNode = <Slide10PianistAndDriverContent />;
+      break;
+    case 12:
+      builtinNode = <Slide11PhilippiansScriptureContent />;
       break;
     default:
       builtinNode = <Slide01CoverContent />;

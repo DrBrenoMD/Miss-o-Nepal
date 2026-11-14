@@ -133,6 +133,30 @@ export interface NepalMediaAsset {
 
 export const NEPAL_MEDIA_GALLERY: NepalMediaAsset[] = [
   {
+    id: 'mission-group-bibles',
+    label: 'Comunidade Local no Nepal',
+    category: 'Cultura & Cotidiano',
+    url: '/assets/aistudio/image_7bf7ccc0.png',
+  },
+  {
+    id: 'psalm-46-painting',
+    label: 'Pintura Himalaia · Salmo 46:10',
+    category: 'Cultura & Cotidiano',
+    url: '/assets/aistudio/image_d29afa4c.png',
+  },
+  {
+    id: 'pianist-scene',
+    label: 'Pianista',
+    category: 'Cultura & Cotidiano',
+    url: '/assets/aistudio/image_090d0f50.png',
+  },
+  {
+    id: 'nepali-indrive-driver',
+    label: 'Motorista inDrive no Nepal (Banco de Trás)',
+    category: 'Cultura & Cotidiano',
+    url: '/assets/aistudio/indrive_car_backseat_nepal.jpg',
+  },
+  {
     id: 'buddha',
     label: 'Lumbini · Origem do Budismo',
     category: 'História & Linha do Tempo',
@@ -229,32 +253,12 @@ export const DEFAULT_BUILTIN_SLIDES: SlideMeta[] = [
     ],
   },
   {
-    id: 'builtin-scripture',
-    kind: 'builtin',
-    builtinIndex: 8,
-    visible: true,
-    slideIndex: 1,
-    numberLabel: '02',
-    shortTitle: 'Mateus 5:10-12',
-    fullTitle: 'Mateus 5:10-12',
-    steps: [
-      {
-        subStep: 0,
-        shortLabel: 'Mateus 5:10-12',
-        title: 'Mateus 5:10-12',
-        defaultNotes:
-          '• Leitura de Mateus 5:10-12:\n' +
-          '• "Bem-aventurados os perseguidos por causa da justiça, pois deles é o reino dos céus. Bem-aventurados serão vocês quando, por minha causa, os insultarem, os perseguirem e, mentindo, disserem todo tipo de mal contra vocês. Alegrem-se e regozijem-se, porque grande é a sua recompensa nos céus, pois da mesma forma perseguiram os profetas que viveram antes de vocês."',
-      },
-    ],
-  },
-  {
     id: 'builtin-1',
     kind: 'builtin',
     builtinIndex: 1,
     visible: true,
-    slideIndex: 2,
-    numberLabel: '03',
+    slideIndex: 1,
+    numberLabel: '02',
     shortTitle: 'Geografia & Relevo 3D',
     fullTitle: 'Cartografia Oficial, Escala no Brasil & Relevo 3D',
     steps: [
@@ -479,9 +483,86 @@ export const DEFAULT_BUILTIN_SLIDES: SlideMeta[] = [
       },
     ],
   },
+  {
+    id: 'builtin-scripture',
+    kind: 'builtin',
+    builtinIndex: 8,
+    visible: true,
+    slideIndex: 8,
+    numberLabel: '09',
+    shortTitle: 'Mateus 5:10-12',
+    fullTitle: 'Mateus 5:10-12',
+    steps: [
+      {
+        subStep: 0,
+        shortLabel: 'Mateus 5:10-12',
+        title: 'Mateus 5:10-12',
+        defaultNotes:
+          '• Leitura de Mateus 5:10-12:\n' +
+          '• "Bem-aventurados os perseguidos por causa da justiça, pois deles é o reino dos céus. Bem-aventurados serão vocês quando, por minha causa, os insultarem, os perseguirem e, mentindo, disserem todo tipo de mal contra vocês. Alegrem-se e regozijem-se, porque grande é a sua recompensa nos céus, pois da mesma forma perseguiram os profetas que viveram antes de vocês."',
+      },
+    ],
+  },
+  {
+    id: 'builtin-photo-showcase',
+    kind: 'builtin',
+    builtinIndex: 9,
+    visible: true,
+    slideIndex: 9,
+    numberLabel: '10',
+    shortTitle: 'Foto · Comunidade Nepal',
+    fullTitle: 'Fotografia em Tela Cheia',
+    steps: [
+      {
+        subStep: 0,
+        shortLabel: 'Fotografia',
+        title: 'Fotografia em Destaque',
+        defaultNotes: '• Registro fotográfico em tela cheia (sem textos ou títulos na tela).',
+      },
+    ],
+  },
+  {
+    id: 'builtin-pianist-driver',
+    kind: 'builtin',
+    builtinIndex: 11,
+    visible: true,
+    slideIndex: 10,
+    numberLabel: '11',
+    shortTitle: 'Quadro, Pianista & Motorista',
+    fullTitle: 'Encontros no Nepal · Pintura Salmo 46:10, Pianista & Motorista inDrive',
+    steps: [
+      {
+        subStep: 0,
+        shortLabel: 'Tríptico Fotográfico',
+        title: 'Pintura Salmo 46:10, Pianista & Motorista inDrive',
+        defaultNotes:
+          '• Registro visual triplo lado a lado: a pintura do Himalaia com o Salmo 46:10 ("Be still, and know that I am God"), o pianista e o motorista de carro inDrive visto do banco de trás em Katmandu.',
+      },
+    ],
+  },
+  {
+    id: 'builtin-philippians',
+    kind: 'builtin',
+    builtinIndex: 12,
+    visible: true,
+    slideIndex: 11,
+    numberLabel: '12',
+    shortTitle: 'Filipenses 1:29',
+    fullTitle: 'Filipenses 1:29',
+    steps: [
+      {
+        subStep: 0,
+        shortLabel: 'Filipenses 1:29',
+        title: 'Filipenses 1:29',
+        defaultNotes:
+          '• Leitura de encerramento — Filipenses 1:29:\n' +
+          '• "Porque a vocês foi dado o privilégio de não apenas crer em Cristo, mas também de sofrer por ele".',
+      },
+    ],
+  },
 ];
 
-const MANAGED_DECK_STORAGE_KEY = 'missao_nepal_managed_deck_v2';
+const MANAGED_DECK_STORAGE_KEY = 'missao_nepal_managed_deck_v5';
 
 export function buildStepsForCustomSlide(
   title: string,
