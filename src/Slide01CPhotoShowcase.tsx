@@ -5,7 +5,7 @@ import { SlideStage } from './AnimationWrappers';
 import { useStageInstance } from './broadcast/BroadcastContext';
 
 const BIBLE_WORKERS_PHOTO_SRC = '/assets/aistudio/image_7bf7ccc0.png';
-const SECONDARY_PHOTO_SRC = '/assets/aistudio/image_d29afa4c.png';
+const SECONDARY_PHOTO_SRC = '/assets/aistudio/image_7a9ffb8d.png';
 
 export const Slide01CPhotoShowcaseContent: React.FC = () => {
   const deckContext = useContext(DeckContext) as any;

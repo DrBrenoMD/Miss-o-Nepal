@@ -139,6 +139,12 @@ export const NEPAL_MEDIA_GALLERY: NepalMediaAsset[] = [
     url: '/assets/aistudio/image_7bf7ccc0.png',
   },
   {
+    id: 'bus-journey-nepal',
+    label: 'Viagem de Ônibus no Nepal',
+    category: 'Cultura & Cotidiano',
+    url: '/assets/aistudio/image_7a9ffb8d.png',
+  },
+  {
     id: 'psalm-46-painting',
     label: 'Pintura Himalaia · Salmo 46:10',
     category: 'Cultura & Cotidiano',
