@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Slide, useSteps } from 'spectacle';
+import { Slide, useSteps, SlideContext } from 'spectacle';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   LiquidGlassContainer,
@@ -1008,6 +1008,7 @@ export const Slide03TimelineContent: React.FC = () => {
   const prevStepRef = useRef<TimelineStep>(0);
   const stageInstance = useStageInstance();
   const broadcast = useOptionalBroadcast();
+  const slideContext = React.useContext(SlideContext) as any;
 
   useEffect(() => {
     setManualStep(null);
@@ -1018,10 +1019,12 @@ export const Slide03TimelineContent: React.FC = () => {
       ? Math.max(0, Math.min(7, Math.round(step + 1)))
       : 0;
 
+  const isSlideActive = slideContext ? Boolean(slideContext.isSlideActive) : true;
+
   const syncedSubStep =
     stageInstance.forcedSubStep !== null
       ? (Math.max(0, Math.min(7, stageInstance.forcedSubStep)) as TimelineStep)
-      : broadcast && broadcast.mode !== 'standalone' && broadcast.roomState.slideIndex === 7
+      : broadcast && broadcast.mode !== 'standalone' && isSlideActive
       ? (Math.max(0, Math.min(7, broadcast.roomState.subStep)) as TimelineStep)
       : null;
 

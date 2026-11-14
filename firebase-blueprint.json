@@ -137,7 +137,7 @@
         },
         "slideIndex": {
           "type": "integer",
-          "description": "Active zero-based slide index (0 to 60)."
+          "description": "Active zero-based slide index."
         },
         "subStep": {
           "type": "integer",
@@ -263,6 +263,43 @@
         "updatedBy",
         "updatedAt"
       ]
+    },
+    "CastDeck": {
+      "title": "CastDeck",
+      "description": "Synchronized slide deck ordering, visibility flags, and custom slides for a presentation room.",
+      "type": "object",
+      "properties": {
+        "roomId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Room code identifier."
+        },
+        "appScope": {
+          "type": "string",
+          "enum": ["missao-nepal-v1"],
+          "maxLength": 32,
+          "description": "Application namespace identifier."
+        },
+        "slides": {
+          "type": "array",
+          "description": "Ordered list of slide configuration objects (visibility, order, custom slide content)."
+        },
+        "updatedBy": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Client ID that updated the deck."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the deck update."
+        }
+      },
+      "required": ["roomId", "appScope", "slides", "updatedBy", "updatedAt"]
     }
   },
   "firestore": {
@@ -277,6 +314,10 @@
     "/castRooms/{roomId}": {
       "schema": "CastRoom",
       "description": "Live synchronized presentation rooms."
+    },
+    "/castDecks/{roomId}": {
+      "schema": "CastDeck",
+      "description": "Synchronized custom slide deck configuration per room."
     }
   }
 }

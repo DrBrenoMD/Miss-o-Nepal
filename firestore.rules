@@ -35,6 +35,16 @@ service cloud.firestore {
         && stroke.pts is list && stroke.pts.size() <= 600;
     }
 
+    function isValidSlideItemSample(slide) {
+      return slide is map
+        && slide.keys().hasAll(['id', 'kind', 'visible', 'shortTitle', 'fullTitle'])
+        && slide.id is string && slide.id.size() >= 1 && slide.id.size() <= 64
+        && slide.kind is string && (slide.kind == 'builtin' || slide.kind == 'custom')
+        && slide.visible is bool
+        && slide.shortTitle is string && slide.shortTitle.size() <= 120
+        && slide.fullTitle is string && slide.fullTitle.size() <= 240;
+    }
+
     // Validation Blueprint: CastDevice (/castDevices/{deviceId})
     function isValidCastDevice(data) {
       return data.keys().hasAll([
@@ -77,10 +87,10 @@ service cloud.firestore {
       && data.screenResolution is string && data.screenResolution.size() >= 3 && data.screenResolution.size() <= 24
       && data.mode is string && data.mode.size() <= 16 && (data.mode == 'standalone' || data.mode == 'presenter' || data.mode == 'screen')
       && isValidRoomCode(data.roomId)
-      && data.slideIndex is int && data.slideIndex >= 0 && data.slideIndex <= 60
+      && data.slideIndex is int && data.slideIndex >= 0 && data.slideIndex <= 40
       && data.summonRoomId is string && data.summonRoomId.size() <= 16 && (data.summonRoomId.size() == 0 || data.summonRoomId.matches('^[a-zA-Z0-9_\\-]+$'))
-      && data.summonSlideIndex is int && data.summonSlideIndex >= 0 && data.summonSlideIndex <= 60
-      && data.summonSubStep is int && data.summonSubStep >= 0 && data.summonSubStep <= 60
+      && data.summonSlideIndex is int && data.summonSlideIndex >= 0 && data.summonSlideIndex <= 40
+      && data.summonSubStep is int && data.summonSubStep >= 0 && data.summonSubStep <= 30
       && data.summonNonce is string && data.summonNonce.size() <= 64
       && data.updatedAt == request.time;
     }
@@ -144,8 +154,8 @@ service cloud.firestore {
       && isValidRoomCode(data.roomId)
       && data.appScope is string && data.appScope == 'missao-nepal-v1' && data.appScope.size() <= 32
       && data.activePresenterId is string && data.activePresenterId.size() <= 64
-      && data.slideIndex is int && data.slideIndex >= 0 && data.slideIndex <= 60
-      && data.subStep is int && data.subStep >= 0 && data.subStep <= 60
+      && data.slideIndex is int && data.slideIndex >= 0 && data.slideIndex <= 40
+      && data.subStep is int && data.subStep >= 0 && data.subStep <= 30
       && data.blackout is bool
       && data.pointerActive is bool
       && data.pointerX is number && data.pointerX >= 0 && data.pointerX <= 1920
@@ -160,10 +170,33 @@ service cloud.firestore {
       && data.timerRunning is bool
       && data.timerElapsedMs is number && data.timerElapsedMs >= 0 && data.timerElapsedMs <= 86400000
       && data.timerStartedAtMs is number && data.timerStartedAtMs >= 0
-      && data.strokesSlideIndex is int && data.strokesSlideIndex >= 0 && data.strokesSlideIndex <= 60
+      && data.strokesSlideIndex is int && data.strokesSlideIndex >= 0 && data.strokesSlideIndex <= 40
       && data.strokesCurrentSlide is list && data.strokesCurrentSlide.size() <= 80 && (data.strokesCurrentSlide.size() == 0 || isValidStrokeSample(data.strokesCurrentSlide[0]))
       && data.noteKey is string && data.noteKey.size() <= 16
       && data.noteText is string && data.noteText.size() <= 4000
+      && data.updatedBy is string && data.updatedBy.size() >= 4 && data.updatedBy.size() <= 64 && data.updatedBy.matches('^[a-zA-Z0-9_\\-]+$')
+      && data.updatedAt == request.time;
+    }
+
+    // Validation Blueprint: CastDeck (/castDecks/{roomId})
+    function isValidCastDeck(data) {
+      return data.keys().hasAll([
+        'roomId',
+        'appScope',
+        'slides',
+        'updatedBy',
+        'updatedAt'
+      ])
+      && data.keys().hasOnly([
+        'roomId',
+        'appScope',
+        'slides',
+        'updatedBy',
+        'updatedAt'
+      ])
+      && isValidRoomCode(data.roomId)
+      && data.appScope is string && data.appScope == 'missao-nepal-v1' && data.appScope.size() <= 32
+      && data.slides is list && data.slides.size() >= 1 && data.slides.size() <= 40 && isValidSlideItemSample(data.slides[0])
       && data.updatedBy is string && data.updatedBy.size() >= 4 && data.updatedBy.size() <= 64 && data.updatedBy.matches('^[a-zA-Z0-9_\\-]+$')
       && data.updatedAt == request.time;
     }
@@ -254,6 +287,25 @@ service cloud.firestore {
           'strokesCurrentSlide',
           'noteKey',
           'noteText',
+          'updatedBy',
+          'updatedAt'
+        ]);
+    }
+
+    // Synchronized Custom Slide Decks per Room
+    match /castDecks/{roomId} {
+      allow get: if isValidRoomCode(roomId);
+
+      allow create: if isValidRoomCode(roomId)
+        && isValidCastDeck(incoming())
+        && incoming().roomId == roomId;
+
+      allow update: if isValidRoomCode(roomId)
+        && isValidCastDeck(incoming())
+        && incoming().roomId == existing().roomId
+        && incoming().appScope == existing().appScope
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'slides',
           'updatedBy',
           'updatedAt'
         ]);

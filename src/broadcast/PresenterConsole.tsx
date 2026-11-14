@@ -25,6 +25,7 @@ import {
   Check,
   LayoutGrid,
   FileText,
+  Sliders,
 } from 'lucide-react';
 import {
   useBroadcast,
@@ -33,11 +34,11 @@ import {
 } from './BroadcastContext';
 import { AnnotationTool, DrawingStroke, TimerState } from './types';
 import {
-  PRESENTATION_SLIDES,
   getNextPosition,
   getPrevPosition,
   getLinearStepStats,
   getStepMeta,
+  useManagedDeck,
 } from './presentationMetadata';
 import { SlideStagePreview } from './SlideStagePreview';
 import { LiveAnnotationOverlay } from './LiveAnnotationOverlay';
@@ -138,6 +139,7 @@ export const PresenterConsole: React.FC = () => {
     roomId,
     roomState,
     openBroadcastModal,
+    openSlideManager,
     castToDevices,
     leaveBroadcast,
     goToPosition,
@@ -158,6 +160,7 @@ export const PresenterConsole: React.FC = () => {
 
   const overlay = useBroadcastOverlay();
   const { networkDevices, presence, getNoteForStep } = useBroadcastDiscovery();
+  const { activeSlides, version: deckVersion } = useManagedDeck();
 
   const [activeTool, setActiveTool] = useState<AnnotationTool>('laser');
   const [brushColor, setBrushColor] = useState<string>('#dc143c');
@@ -177,14 +180,26 @@ export const PresenterConsole: React.FC = () => {
   }, [activeTool, brushColor, emitPointer, overlay.pointer?.active, overlay.spotlight?.active, setSpotlight]);
 
   const { slideIndex, subStep } = roomState;
-  const currentMeta = useMemo(() => getStepMeta(slideIndex, subStep), [slideIndex, subStep]);
-  const nextPos = useMemo(() => getNextPosition(slideIndex, subStep), [slideIndex, subStep]);
-  const prevPos = useMemo(() => getPrevPosition(slideIndex, subStep), [slideIndex, subStep]);
+  const currentMeta = useMemo(
+    () => getStepMeta(slideIndex, subStep),
+    [slideIndex, subStep, deckVersion]
+  );
+  const nextPos = useMemo(
+    () => getNextPosition(slideIndex, subStep),
+    [slideIndex, subStep, deckVersion]
+  );
+  const prevPos = useMemo(
+    () => getPrevPosition(slideIndex, subStep),
+    [slideIndex, subStep, deckVersion]
+  );
   const nextMeta = useMemo(
     () => (nextPos ? getStepMeta(nextPos.slideIndex, nextPos.subStep) : null),
-    [nextPos]
+    [nextPos, deckVersion]
   );
-  const linearStats = useMemo(() => getLinearStepStats(slideIndex, subStep), [slideIndex, subStep]);
+  const linearStats = useMemo(
+    () => getLinearStepStats(slideIndex, subStep),
+    [slideIndex, subStep, deckVersion]
+  );
 
   const currentStrokes = overlay.drawingsBySlide[slideIndex] || [];
   const screensCount = presence.filter((p) => p.role === 'screen').length;
@@ -289,8 +304,18 @@ export const PresenterConsole: React.FC = () => {
           onTimerAction={timerAction}
         />
 
-        {/* Direita: Cortina (Blackout) & Sair */}
+        {/* Direita: Gerenciar Slides, Cortina (Blackout) & Sair */}
         <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={openSlideManager}
+            className="min-h-[40px] px-3 py-1.5 rounded-xl bg-[#003893] hover:bg-[#0046b5] text-white font-sans text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shadow-sm"
+            title="Gerenciar ordem, exibir/ocultar e editar slides"
+          >
+            <Sliders className="w-4 h-4" />
+            <span className="hidden sm:inline">Slides / Editor</span>
+          </button>
+
           <button
             type="button"
             onClick={() => setBlackout(!overlay.blackout)}
@@ -333,7 +358,7 @@ export const PresenterConsole: React.FC = () => {
             <div className="min-w-0">
               <div className="font-sans text-[11px] font-bold uppercase tracking-wider text-rose-400">
                 Ao Vivo nos Telões · Slide {currentMeta.slide.numberLabel}/
-                {String(PRESENTATION_SLIDES.length).padStart(2, '0')} · Passo{' '}
+                {String(activeSlides.length).padStart(2, '0')} · Passo{' '}
                 {linearStats.currentLinearStep}/{linearStats.totalLinearSteps}
               </div>
               <h1 className="font-display text-sm sm:text-base font-extrabold text-white truncate">
@@ -465,86 +490,96 @@ export const PresenterConsole: React.FC = () => {
                 ))}
               </div>
 
-              {/* Controles Remotos Específicos dos Slides 3, 4 e 8 */}
-              {slideIndex === 2 && (
-                <div className="flex items-center gap-1">
-                  <span className="font-sans text-[11px] text-slate-400 mr-1">Gráfico Slide 3:</span>
-                  {(
-                    [
-                      { id: 'perCapita', label: 'Per Capita' },
-                      { id: 'gdp', label: 'PIB Total' },
-                      { id: 'hdi', label: 'IDH' },
-                    ] as const
-                  ).map((m) => (
-                    <button
-                      key={m.id}
-                      type="button"
-                      onClick={() => updateSlideCustomState({ economyMetric: m.id })}
-                      className={`px-2.5 py-1 rounded-lg font-sans text-[11px] font-bold cursor-pointer ${
-                        roomState.slideCustomState.economyMetric === m.id
-                          ? 'bg-[#003893] text-white'
-                          : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
-                      }`}
-                    >
-                      {m.label}
-                    </button>
-                  ))}
-                </div>
-              )}
+              {/* Controles Remotos Específicos dos Slides Originais (Economia, Castas e Linha do Tempo) */}
+              {currentMeta.slide.kind === 'builtin' &&
+                currentMeta.slide.builtinIndex === 2 && (
+                  <div className="flex items-center gap-1">
+                    <span className="font-sans text-[11px] text-slate-400 mr-1">
+                      Gráfico Economia:
+                    </span>
+                    {(
+                      [
+                        { id: 'perCapita', label: 'Per Capita' },
+                        { id: 'gdp', label: 'PIB Total' },
+                        { id: 'hdi', label: 'IDH' },
+                      ] as const
+                    ).map((m) => (
+                      <button
+                        key={m.id}
+                        type="button"
+                        onClick={() => updateSlideCustomState({ economyMetric: m.id })}
+                        className={`px-2.5 py-1 rounded-lg font-sans text-[11px] font-bold cursor-pointer ${
+                          roomState.slideCustomState.economyMetric === m.id
+                            ? 'bg-[#003893] text-white'
+                            : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                        }`}
+                      >
+                        {m.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
 
-              {slideIndex === 3 && (
-                <div className="flex items-center gap-1 flex-wrap">
-                  <span className="font-sans text-[11px] text-slate-400 mr-1">Destacar Casta:</span>
-                  {[1, 2, 3, 4].map((t) => (
+              {currentMeta.slide.kind === 'builtin' &&
+                currentMeta.slide.builtinIndex === 3 && (
+                  <div className="flex items-center gap-1 flex-wrap">
+                    <span className="font-sans text-[11px] text-slate-400 mr-1">
+                      Destacar Casta:
+                    </span>
+                    {[1, 2, 3, 4].map((t) => (
+                      <button
+                        key={t}
+                        type="button"
+                        onClick={() =>
+                          updateSlideCustomState({
+                            casteTier: roomState.slideCustomState.casteTier === t ? null : t,
+                          })
+                        }
+                        className={`px-2.5 py-1 rounded-lg font-sans text-[11px] font-bold cursor-pointer ${
+                          roomState.slideCustomState.casteTier === t
+                            ? 'bg-[#003893] text-white'
+                            : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                        }`}
+                      >
+                        Nível {t}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+              {currentMeta.slide.kind === 'builtin' &&
+                currentMeta.slide.builtinIndex === 7 &&
+                subStep >= 3 && (
+                  <div className="flex items-center gap-1">
+                    <span className="font-sans text-[11px] text-slate-400 mr-1">
+                      Lente Gráfico:
+                    </span>
                     <button
-                      key={t}
                       type="button"
                       onClick={() =>
                         updateSlideCustomState({
-                          casteTier: roomState.slideCustomState.casteTier === t ? null : t,
+                          timelineLens:
+                            subStep === 7
+                              ? roomState.slideCustomState.timelineLens === 'era'
+                                ? 'auto'
+                                : 'era'
+                              : roomState.slideCustomState.timelineLens === 'panorama'
+                              ? 'auto'
+                              : 'panorama',
                         })
                       }
-                      className={`px-2.5 py-1 rounded-lg font-sans text-[11px] font-bold cursor-pointer ${
-                        roomState.slideCustomState.casteTier === t
-                          ? 'bg-[#003893] text-white'
-                          : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
-                      }`}
+                      className="px-2.5 py-1 rounded-lg bg-[#003893] hover:bg-[#0046b5] text-white font-sans text-[11px] font-bold cursor-pointer"
                     >
-                      Nível {t}
+                      {subStep === 7
+                        ? roomState.slideCustomState.timelineLens === 'era'
+                          ? 'Panorama Completo'
+                          : 'Focar 1981–2026'
+                        : roomState.slideCustomState.timelineLens === 'panorama'
+                        ? 'Zoom da Época'
+                        : 'Panorama Geral'}
                     </button>
-                  ))}
-                </div>
-              )}
-
-              {slideIndex === 7 && subStep >= 3 && (
-                <div className="flex items-center gap-1">
-                  <span className="font-sans text-[11px] text-slate-400 mr-1">Lente Gráfico:</span>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      updateSlideCustomState({
-                        timelineLens:
-                          subStep === 7
-                            ? roomState.slideCustomState.timelineLens === 'era'
-                              ? 'auto'
-                              : 'era'
-                            : roomState.slideCustomState.timelineLens === 'panorama'
-                            ? 'auto'
-                            : 'panorama',
-                      })
-                    }
-                    className="px-2.5 py-1 rounded-lg bg-[#003893] hover:bg-[#0046b5] text-white font-sans text-[11px] font-bold cursor-pointer"
-                  >
-                    {subStep === 7
-                      ? roomState.slideCustomState.timelineLens === 'era'
-                        ? 'Panorama Completo'
-                        : 'Focar 1981–2026'
-                      : roomState.slideCustomState.timelineLens === 'panorama'
-                      ? 'Zoom da Época'
-                      : 'Panorama Geral'}
-                  </button>
-                </div>
-              )}
+                  </div>
+                )}
             </div>
           </div>
 
@@ -578,7 +613,7 @@ export const PresenterConsole: React.FC = () => {
               }`}
             >
               <LayoutGrid className="w-4 h-4" />
-              <span>Slides ({PRESENTATION_SLIDES.length})</span>
+              <span>Slides ({activeSlides.length})</span>
             </button>
           </div>
         </div>
@@ -632,8 +667,7 @@ export const PresenterConsole: React.FC = () => {
             ) : (
               <div className="w-full py-8 rounded-xl bg-slate-900/80 border border-slate-800 flex flex-col items-center justify-center text-center px-4">
                 <span className="font-display text-sm font-extrabold uppercase tracking-wider text-slate-300">
-                  Última Etapa Alcançada ({linearStats.totalLinearSteps} /{' '}
-                  {linearStats.totalLinearSteps})
+                  Última Etapa Alcançada (18 / 18)
                 </span>
                 <span className="font-sans text-xs text-slate-500 mt-1">
                   Você está no encerramento da apresentação Missão Nepal
@@ -718,11 +752,11 @@ export const PresenterConsole: React.FC = () => {
               <div className="font-sans text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
                 Ir Diretamente para Slide ou Etapa:
               </div>
-              {PRESENTATION_SLIDES.map((s) => {
+              {activeSlides.map((s) => {
                 const isCurrentSlide = s.slideIndex === slideIndex;
                 return (
                   <div
-                    key={s.slideIndex}
+                    key={s.id}
                     className={`rounded-xl border p-2.5 ${
                       isCurrentSlide
                         ? 'bg-[#003893]/20 border-[#003893]'
@@ -776,11 +810,11 @@ export const PresenterConsole: React.FC = () => {
          ===================================================================== */}
       <footer className="bg-[#111827] border-t border-slate-800 px-3 sm:px-5 py-2.5 shrink-0 space-y-2">
         <div className="hidden lg:flex items-center gap-1.5 overflow-x-auto pb-1">
-          {PRESENTATION_SLIDES.map((s) => {
+          {activeSlides.map((s) => {
             const isCurrentSlide = s.slideIndex === slideIndex;
             return (
               <div
-                key={s.slideIndex}
+                key={s.id}
                 className={`flex items-center gap-1 rounded-xl border px-2 py-1 shrink-0 transition-colors ${
                   isCurrentSlide
                     ? 'bg-[#003893]/25 border-[#003893]'
@@ -854,7 +888,7 @@ export const PresenterConsole: React.FC = () => {
 
           <button
             type="button"
-            disabled={slideIndex >= PRESENTATION_SLIDES.length - 1}
+            disabled={slideIndex >= activeSlides.length - 1}
             onClick={nextSlideBroadcast}
             title="Pular para o Próximo Slide"
             className="col-span-2 sm:col-span-2 min-h-[48px] rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-35 disabled:cursor-not-allowed text-slate-200 font-sans text-xs font-bold flex items-center justify-center gap-1 transition-colors cursor-pointer"

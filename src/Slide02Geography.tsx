@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, memo } from 'react';
-import { Slide, useSteps } from 'spectacle';
+import { Slide, useSteps, SlideContext } from 'spectacle';
 import { motion, AnimatePresence, animate } from 'framer-motion';
 import {
   LiquidGlassContainer,
@@ -328,6 +328,7 @@ export const Slide02GeographyContent: React.FC = () => {
   const [manualStage, setManualStage] = useState<GeoStage | null>(null);
   const stageInstance = useStageInstance();
   const broadcast = useOptionalBroadcast();
+  const slideContext = React.useContext(SlideContext) as any;
 
   useEffect(() => {
     setManualStage(null);
@@ -339,10 +340,12 @@ export const Slide02GeographyContent: React.FC = () => {
       : 0;
   const clampedSpectacleStage = safeStepNumber as GeoStage;
 
+  const isSlideActive = slideContext ? Boolean(slideContext.isSlideActive) : true;
+
   const syncedSubStep =
     stageInstance.forcedSubStep !== null
       ? (Math.max(0, Math.min(3, stageInstance.forcedSubStep)) as GeoStage)
-      : broadcast && broadcast.mode !== 'standalone' && broadcast.roomState.slideIndex === 1
+      : broadcast && broadcast.mode !== 'standalone' && isSlideActive
       ? (Math.max(0, Math.min(3, broadcast.roomState.subStep)) as GeoStage)
       : null;
 

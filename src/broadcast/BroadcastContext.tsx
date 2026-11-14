@@ -38,10 +38,13 @@ import {
 } from './types';
 import {
   clampPosition,
+  getAllManagedSlides,
   getNextPosition,
   getPrevPosition,
   makeNoteKey,
   PRESENTATION_SLIDES,
+  setManagedDeckSlides,
+  SlideMeta,
 } from './presentationMetadata';
 import {
   StageInstanceConfig,
@@ -299,6 +302,18 @@ function isFirestorePermissionError(error: unknown): boolean {
   return /Missing or insufficient permissions|permission-denied/i.test(msg);
 }
 
+function sanitizeSlidesForFirestore(slides: SlideMeta[]): Record<string, any>[] {
+  const cleanJson = JSON.parse(JSON.stringify(slides.slice(0, 40))) as Array<Record<string, any>>;
+  return cleanJson.map((s, idx) => ({
+    ...s,
+    id: String(s.id || `slide-${idx}`).slice(0, 64),
+    kind: s.kind === 'custom' ? 'custom' : 'builtin',
+    visible: Boolean(s.visible),
+    shortTitle: String(s.shortTitle || `Slide ${idx + 1}`).slice(0, 120),
+    fullTitle: String(s.fullTitle || s.shortTitle || `Slide ${idx + 1}`).slice(0, 240),
+  }));
+}
+
 function resolvePublicReceiverBaseUrl(): string {
   if (typeof window === 'undefined') return 'http://localhost:3000';
   const origin = window.location.origin.replace(/\/+$/, '');
@@ -318,6 +333,9 @@ export interface BroadcastContextValue {
   roomState: BroadcastNavState;
   openBroadcastModal: () => void;
   closeBroadcastModal: () => void;
+  openSlideManager: () => void;
+  closeSlideManager: () => void;
+  syncDeckStructure: (nextSlides: SlideMeta[]) => void;
   reportStandaloneDeckPosition: (slideIndex: number, subStep: number) => void;
   startPresenting: (
     customRoomId?: string,
@@ -359,6 +377,7 @@ export interface BroadcastOverlayContextValue extends BroadcastOverlayState {}
 export interface BroadcastDiscoveryContextValue {
   connected: boolean;
   isBroadcastModalOpen: boolean;
+  isSlideManagerOpen: boolean;
   isScanningNetwork: boolean;
   networkDevices: NetworkDeviceInfo[];
   presence: ClientPresence[];
@@ -428,6 +447,7 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   const [connected, setConnected] = useState<boolean>(false);
   const [isBroadcastModalOpen, setIsBroadcastModalOpen] = useState<boolean>(false);
+  const [isSlideManagerOpen, setIsSlideManagerOpen] = useState<boolean>(false);
   const [isScanningNetwork, setIsScanningNetwork] = useState<boolean>(false);
   const [networkDevices, setNetworkDevices] = useState<NetworkDeviceInfo[]>([]);
   const [customNotes, setCustomNotes] = useState<Record<string, string>>(() => loadSavedNotes());
@@ -530,7 +550,7 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       screenResolution: deviceProfileRef.current.resolution.slice(0, 24),
       mode: modeRef.current,
       roomId: sanitizeRoomCode(roomIdRef.current),
-      slideIndex: Math.max(0, Math.min(20, Math.trunc(activeSlide))),
+      slideIndex: Math.max(0, Math.min(40, Math.trunc(activeSlide))),
       summonRoomId: '',
       summonSlideIndex: 0,
       summonSubStep: 0,
@@ -547,6 +567,37 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       }
     }
   }, []);
+
+  // ==========================================================================
+  // FUNÇÃO DE ESCRITA DA ESTRUTURA DO DECK (/castDecks/{roomId})
+  // ==========================================================================
+  const pushDeckToFirestore = useCallback(
+    async (explicitRoomId?: string, explicitSlides?: SlideMeta[]) => {
+      if (typeof window === 'undefined') return;
+      const targetRoom = sanitizeRoomCode(explicitRoomId || roomIdRef.current);
+      const path = `castDecks/${targetRoom}`;
+      const slidesToPush = explicitSlides || getAllManagedSlides();
+      const sanitized = sanitizeSlidesForFirestore(slidesToPush);
+      if (sanitized.length === 0) return;
+
+      const payload = {
+        roomId: targetRoom,
+        appScope: APP_SCOPE,
+        slides: sanitized,
+        updatedBy: clientIdRef.current,
+        updatedAt: serverTimestamp(),
+      };
+
+      try {
+        await setDoc(doc(db, 'castDecks', targetRoom), payload);
+      } catch (error) {
+        if (isFirestorePermissionError(error)) {
+          handleFirestoreError(error, OperationType.WRITE, path);
+        }
+      }
+    },
+    []
+  );
 
   // ==========================================================================
   // FUNÇÃO DE ESCRITA DO ESTADO COMPLETO DA SALA (/castRooms/{roomId})
@@ -569,7 +620,7 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         roomId: targetRoom,
         appScope: APP_SCOPE,
         activePresenterId: presenterId,
-        slideIndex: Math.max(0, Math.min(20, Math.trunc(nav.slideIndex))),
+        slideIndex: Math.max(0, Math.min(40, Math.trunc(nav.slideIndex))),
         subStep: Math.max(0, Math.min(30, Math.trunc(nav.subStep))),
         blackout: Boolean(ov.blackout),
         pointerActive: Boolean(ov.pointer?.active),
@@ -587,7 +638,7 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         timerRunning: Boolean(ov.timer.running),
         timerElapsedMs: Math.max(0, Math.min(86400000, Math.trunc(ov.timer.elapsedMs))),
         timerStartedAtMs: ov.timer.startedAt ? Math.max(0, Math.trunc(ov.timer.startedAt)) : 0,
-        strokesSlideIndex: Math.max(0, Math.min(20, Math.trunc(nav.slideIndex))),
+        strokesSlideIndex: Math.max(0, Math.min(40, Math.trunc(nav.slideIndex))),
         strokesCurrentSlide: serializeStrokesForFirestore(currentStrokes),
         noteKey: latestNoteRef.current.key.slice(0, 16),
         noteText: latestNoteRef.current.text.slice(0, 4000),
@@ -750,6 +801,17 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           timer: msg.timer as TimerState,
           serverTimeOffsetMs: 0,
         }));
+        return;
+      }
+
+      if (type === 'deck:sync' && Array.isArray(msg.slides)) {
+        setManagedDeckSlides(msg.slides as SlideMeta[]);
+        setNavState((prev) => {
+          const clamped = clampPosition(prev.slideIndex, prev.subStep);
+          return clamped.slideIndex === prev.slideIndex && clamped.subStep === prev.subStep
+            ? prev
+            : { ...prev, slideIndex: clamped.slideIndex, subStep: clamped.subStep };
+        });
       }
     },
     []
@@ -809,6 +871,11 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         ) {
           applyRemoteCastCommand(data.command as RemoteCastCommand);
         }
+        return;
+      }
+
+      if (data.type === 'deck:sync' && Array.isArray(data.slides)) {
+        applyDirectLocalPacket(data);
         return;
       }
 
@@ -1211,8 +1278,36 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       }
     );
 
+    const deckDocRef = doc(db, 'castDecks', cleanRoom);
+    const deckPath = `castDecks/${cleanRoom}`;
+
+    const unsubDeck = onSnapshot(
+      deckDocRef,
+      (snap) => {
+        if (!snap.exists()) return;
+        if (snap.metadata.hasPendingWrites) return;
+        const d = snap.data();
+        if (d.updatedBy === clientIdRef.current) return;
+        if (Array.isArray(d.slides) && d.slides.length > 0) {
+          setManagedDeckSlides(d.slides as SlideMeta[]);
+          setNavState((prev) => {
+            const clamped = clampPosition(prev.slideIndex, prev.subStep);
+            return clamped.slideIndex === prev.slideIndex && clamped.subStep === prev.subStep
+              ? prev
+              : { ...prev, slideIndex: clamped.slideIndex, subStep: clamped.subStep };
+          });
+        }
+      },
+      (error) => {
+        if (isFirestorePermissionError(error)) {
+          handleFirestoreError(error, OperationType.GET, deckPath);
+        }
+      }
+    );
+
     return () => {
       unsubRoom();
+      unsubDeck();
     };
   }, [mode, roomId, isBroadcastModalOpen, publishMyDevicePresence]);
 
@@ -1261,6 +1356,41 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     setIsBroadcastModalOpen(false);
   }, []);
 
+  const openSlideManager = useCallback(() => {
+    setIsSlideManagerOpen(true);
+  }, []);
+
+  const closeSlideManager = useCallback(() => {
+    setIsSlideManagerOpen(false);
+  }, []);
+
+  const syncDeckStructure = useCallback(
+    (nextSlides: SlideMeta[]) => {
+      setManagedDeckSlides(nextSlides);
+      setNavState((prev) => {
+        const clamped = clampPosition(prev.slideIndex, prev.subStep);
+        const nextNav = {
+          ...prev,
+          slideIndex: clamped.slideIndex,
+          subStep: clamped.subStep,
+        };
+        navStateRef.current = nextNav;
+        return nextNav;
+      });
+
+      sendDirectLocalFastPath({
+        type: 'deck:sync',
+        slides: nextSlides,
+      });
+
+      if (modeRef.current !== 'standalone') {
+        pushDeckToFirestore(roomIdRef.current, nextSlides);
+        pushRoomStateToFirestore(roomIdRef.current);
+      }
+    },
+    [pushDeckToFirestore, pushRoomStateToFirestore, sendDirectLocalFastPath]
+  );
+
   const reportStandaloneDeckPosition = useCallback((slideIndex: number, subStep: number) => {
     const prev = standaloneDeckPosRef.current;
     standaloneDeckPosRef.current = { slideIndex, subStep };
@@ -1306,15 +1436,25 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       setOverlayState(overlayStateRef.current);
 
       sendDirectLocalFastPath({
+        type: 'deck:sync',
+        slides: getAllManagedSlides(),
+      });
+      sendDirectLocalFastPath({
         type: 'nav:goto',
         slideIndex: clamped.slideIndex,
         subStep: clamped.subStep,
         clearPointer: true,
       });
+      pushDeckToFirestore(targetRoom);
       pushRoomStateToFirestore(targetRoom);
       publishMyDevicePresence();
     },
-    [publishMyDevicePresence, pushRoomStateToFirestore, sendDirectLocalFastPath]
+    [
+      publishMyDevicePresence,
+      pushDeckToFirestore,
+      pushRoomStateToFirestore,
+      sendDirectLocalFastPath,
+    ]
   );
 
   /**
@@ -1381,7 +1521,8 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         }
       }
 
-      // 2. Grava estado inicial da sala no Firestore imediatamente
+      // 2. Grava estado inicial da sala e do deck no Firestore imediatamente
+      await pushDeckToFirestore(targetRoom);
       await pushRoomStateToFirestore(targetRoom);
       publishMyDevicePresence();
 
@@ -1410,7 +1551,7 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           try {
             await updateDoc(doc(db, 'castDevices', targetId), {
               summonRoomId: targetRoom,
-              summonSlideIndex: Math.max(0, Math.min(20, Math.trunc(clamped.slideIndex))),
+              summonSlideIndex: Math.max(0, Math.min(40, Math.trunc(clamped.slideIndex))),
               summonSubStep: Math.max(0, Math.min(30, Math.trunc(clamped.subStep))),
               summonNonce: nonce,
               updatedAt: serverTimestamp(),
@@ -1423,7 +1564,7 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         })
       );
     },
-    [publishMyDevicePresence, pushRoomStateToFirestore]
+    [publishMyDevicePresence, pushDeckToFirestore, pushRoomStateToFirestore]
   );
 
   /**
@@ -1785,6 +1926,9 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       roomState: navState,
       openBroadcastModal,
       closeBroadcastModal,
+      openSlideManager,
+      closeSlideManager,
+      syncDeckStructure,
       reportStandaloneDeckPosition,
       startPresenting,
       castToDevices,
@@ -1814,6 +1958,9 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       navState,
       openBroadcastModal,
       closeBroadcastModal,
+      openSlideManager,
+      closeSlideManager,
+      syncDeckStructure,
       reportStandaloneDeckPosition,
       startPresenting,
       castToDevices,
@@ -1843,6 +1990,7 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     () => ({
       connected,
       isBroadcastModalOpen,
+      isSlideManagerOpen,
       isScanningNetwork,
       networkDevices,
       presence,
@@ -1856,6 +2004,7 @@ export const BroadcastProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     [
       connected,
       isBroadcastModalOpen,
+      isSlideManagerOpen,
       isScanningNetwork,
       networkDevices,
       presence,

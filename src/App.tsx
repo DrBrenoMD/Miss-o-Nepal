@@ -6,21 +6,7 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Deck, Slide, DeckContext } from 'spectacle';
 import { LayoutGroup, AnimatePresence } from 'framer-motion';
-import { Cast } from 'lucide-react';
-import { Slide01CoverContent } from './Slide01Cover';
-import { Slide02GeographyContent } from './Slide02Geography';
-import { Slide02AEconomyHDIContent } from './Slide02AEconomyHDI';
-import { Slide02BLanguagesCastesContent } from './Slide02BLanguagesCastes';
-import { Slide02CDailyCustomsContent } from './Slide02CDailyCustoms';
-import { Slide02DStreetsMobilityContent } from './Slide02DStreetsMobility';
-import { Slide02ERitualsFestivalsContent } from './Slide02ERitualsFestivals';
-import { Slide03TimelineContent } from './Slide03Timeline';
-import { Slide04TheCallContent } from './Slide04TheCall';
-import { Slide05TheJourneyContent } from './Slide05TheJourney';
-import { Slide06TheGroupContent } from './Slide06TheGroup';
-import { Slide07CulturalIntegrationContent } from './Slide07CulturalIntegration';
-import { Slide08BargachhiReceptionContent } from './Slide08BargachhiReception';
-import { getSlideStepCount } from './broadcast/presentationMetadata';
+import { Cast, Sliders } from 'lucide-react';
 import {
   BroadcastProvider,
   useBroadcast,
@@ -28,8 +14,11 @@ import {
   StageInstanceProvider,
 } from './broadcast/BroadcastContext';
 import { BroadcastModal } from './broadcast/BroadcastModal';
+import { SlideManagerModal } from './broadcast/SlideManagerModal';
 import { PresenterConsole } from './broadcast/PresenterConsole';
 import { LiveAnnotationOverlay } from './broadcast/LiveAnnotationOverlay';
+import { useManagedDeck } from './broadcast/presentationMetadata';
+import { ManagedSlideStageContent } from './broadcast/CustomSlideRenderer';
 
 /**
  * Tema base do Spectacle alinhado ao Design System "Missão Nepal" + Liquid Glass
@@ -131,152 +120,192 @@ const DeckOverlayTemplate: React.FC<{
   isFullscreen: boolean;
   onToggleFullscreen: () => void;
   onDeckPositionChange: (slideIndex: number, subStep: number) => void;
-}> = React.memo(({ isFullscreen, onToggleFullscreen, onDeckPositionChange }) => {
-  const deckCtx = React.useContext(DeckContext) as any;
-  const {
-    initialized,
-    activeView,
-    pendingView,
-    slideCount,
-    advanceSlide,
-    regressSlide,
-    skipTo,
-    commitTransition,
-  } = deckCtx;
-  const {
-    mode,
-    roomId,
-    roomState,
-    openBroadcastModal,
-    reportStandaloneDeckPosition,
-  } = useBroadcast();
-  const [touchRevealed, setTouchRevealed] = useState(false);
+  registerSkipToRef?: React.MutableRefObject<((slideIndex: number) => void) | null>;
+}> = React.memo(
+  ({ isFullscreen, onToggleFullscreen, onDeckPositionChange, registerSkipToRef }) => {
+    const deckCtx = React.useContext(DeckContext) as any;
+    const {
+      initialized,
+      activeView,
+      pendingView,
+      slideCount,
+      advanceSlide,
+      regressSlide,
+      skipTo,
+      commitTransition,
+    } = deckCtx;
+    const {
+      mode,
+      roomId,
+      roomState,
+      openBroadcastModal,
+      openSlideManager,
+      reportStandaloneDeckPosition,
+    } = useBroadcast();
+    const { activeSlides } = useManagedDeck();
+    const [touchRevealed, setTouchRevealed] = useState(false);
 
-  const activeSlideIndex = activeView?.slideIndex ?? 0;
-  const pendingSlideIndex = pendingView?.slideIndex ?? activeSlideIndex;
-  const activeStepIndex = activeView?.stepIndex ?? 0;
-  const currentSlide = activeSlideIndex + 1;
-  const totalSlides = slideCount || 1;
+    const activeSlideIndex = activeView?.slideIndex ?? 0;
+    const pendingSlideIndex = pendingView?.slideIndex ?? activeSlideIndex;
+    const activeStepIndex = activeView?.stepIndex ?? 0;
+    const currentSlide = activeSlideIndex + 1;
+    const totalSlides = slideCount || activeSlides.length || 1;
 
-  // Auto-oculta a barra após 4s caso tenha sido aberta por toque no canto em telas touch
-  useEffect(() => {
-    if (!touchRevealed) return;
-    const timer = window.setTimeout(() => setTouchRevealed(false), 4000);
-    return () => window.clearTimeout(timer);
-  }, [touchRevealed]);
+    useEffect(() => {
+      if (!registerSkipToRef) return;
+      registerSkipToRef.current = (targetSlideIdx: number) => {
+        if (typeof skipTo === 'function') {
+          skipTo({ slideIndex: targetSlideIdx, stepIndex: 0 });
+        }
+      };
+      return () => {
+        registerSkipToRef.current = null;
+      };
+    }, [registerSkipToRef, skipTo]);
 
-  // Reporta posição local do Deck via Ref (zero re-renders!) para iniciar transmissão no slide atual
-  useEffect(() => {
-    if (mode === 'standalone') {
-      const hasInternalSteps = getSlideStepCount(activeSlideIndex) > 1;
-      const normalizedSubStep = hasInternalSteps
-        ? Math.max(0, (typeof activeStepIndex === 'number' ? activeStepIndex : -1) + 1)
-        : 0;
-      onDeckPositionChange(activeSlideIndex, normalizedSubStep);
-      reportStandaloneDeckPosition(activeSlideIndex, normalizedSubStep);
-    }
-  }, [mode, activeSlideIndex, activeStepIndex, onDeckPositionChange, reportStandaloneDeckPosition]);
+    // Auto-oculta a barra após 4s caso tenha sido aberta por toque no canto em telas touch
+    useEffect(() => {
+      if (!touchRevealed) return;
+      const timer = window.setTimeout(() => setTouchRevealed(false), 4000);
+      return () => window.clearTimeout(timer);
+    }, [touchRevealed]);
 
-  // Sincronização determinística do Telão Receptor ('screen') com o Apresentador
-  useEffect(() => {
-    if (mode !== 'screen' || !initialized) return;
-    const targetSlide = roomState.slideIndex;
-
-    if (activeSlideIndex !== targetSlide || pendingSlideIndex !== targetSlide) {
-      if (typeof skipTo === 'function') {
-        skipTo({ slideIndex: targetSlide, stepIndex: 0 });
+    // Reporta posição local do Deck via Ref (zero re-renders!) para iniciar transmissão no slide atual
+    useEffect(() => {
+      if (mode === 'standalone') {
+        const currentMeta = activeSlides[activeSlideIndex];
+        const hasInternalSteps = (currentMeta?.steps.length ?? 1) > 1;
+        const normalizedSubStep = hasInternalSteps
+          ? Math.max(0, (typeof activeStepIndex === 'number' ? activeStepIndex : -1) + 1)
+          : 0;
+        onDeckPositionChange(activeSlideIndex, normalizedSubStep);
+        reportStandaloneDeckPosition(activeSlideIndex, normalizedSubStep);
       }
-    }
+    }, [
+      mode,
+      activeSlideIndex,
+      activeStepIndex,
+      activeSlides,
+      onDeckPositionChange,
+      reportStandaloneDeckPosition,
+    ]);
 
-    const verifyTimer = window.setTimeout(() => {
-      if (activeSlideIndex !== targetSlide && typeof commitTransition === 'function') {
-        commitTransition({ slideIndex: targetSlide, stepIndex: 0 });
+    // Sincronização determinística do Telão Receptor ('screen') com o Apresentador
+    useEffect(() => {
+      if (mode !== 'screen' || !initialized) return;
+      const targetSlide = roomState.slideIndex;
+
+      if (activeSlideIndex !== targetSlide || pendingSlideIndex !== targetSlide) {
+        if (typeof skipTo === 'function') {
+          skipTo({ slideIndex: targetSlide, stepIndex: 0 });
+        }
       }
-    }, 240);
 
-    return () => window.clearTimeout(verifyTimer);
-  }, [
-    mode,
-    initialized,
-    roomState.slideIndex,
-    activeSlideIndex,
-    pendingSlideIndex,
-    skipTo,
-    commitTransition,
-  ]);
+      const verifyTimer = window.setTimeout(() => {
+        if (activeSlideIndex !== targetSlide && typeof commitTransition === 'function') {
+          commitTransition({ slideIndex: targetSlide, stepIndex: 0 });
+        }
+      }, 240);
 
-  return (
-    <div
-      onClick={(e) => e.stopPropagation()}
-      className="pointer-events-none absolute inset-0 z-50 flex flex-col justify-end items-end"
-    >
-      {/* Região oculta no canto inferior direito (revela Transmitir + Tela Cheia juntos ao passar o mouse ou tocar no canto) */}
+      return () => window.clearTimeout(verifyTimer);
+    }, [
+      mode,
+      initialized,
+      roomState.slideIndex,
+      activeSlideIndex,
+      pendingSlideIndex,
+      skipTo,
+      commitTransition,
+    ]);
+
+    return (
       <div
-        onTouchStart={() => setTouchRevealed(true)}
-        className="pointer-events-auto group p-7 pl-16 pt-12 flex items-center justify-end"
+        onClick={(e) => e.stopPropagation()}
+        className="pointer-events-none absolute inset-0 z-50 flex flex-col justify-end items-end"
       >
+        {/* Região oculta no canto inferior direito (revela Gerenciar Slides + Transmitir + Tela Cheia ao passar o mouse ou tocar no canto) */}
         <div
-          className={`flex items-center gap-3.5 transition-all duration-300 ease-out ${
-            touchRevealed
-              ? 'opacity-100 translate-y-0'
-              : 'opacity-0 translate-y-2 group-hover:opacity-100 group-hover:translate-y-0 focus-within:opacity-100 focus-within:translate-y-0'
-          }`}
+          onTouchStart={() => setTouchRevealed(true)}
+          className="pointer-events-auto group p-7 pl-16 pt-12 flex items-center justify-end"
         >
-          <div className="flex items-center gap-2 rounded-full bg-white/70 backdrop-blur-md border border-white/85 px-4 py-1.5 shadow-lg">
-            {totalSlides > 1 && mode !== 'screen' && (
-              <>
-                <button
-                  type="button"
-                  onClick={() => regressSlide()}
-                  className="px-2.5 py-1 text-[13px] font-bold uppercase tracking-wider text-[#0f0f0f] hover:text-[#dc143c] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                  aria-label="Slide Anterior"
-                >
-                  ← Anterior
-                </button>
-                <span className="text-[#0f0f0f]/20" aria-hidden="true">|</span>
-                <button
-                  type="button"
-                  onClick={() => advanceSlide()}
-                  className="px-2.5 py-1 text-[13px] font-bold uppercase tracking-wider text-[#003893] hover:text-[#dc143c] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                  aria-label="Próximo Slide"
-                >
-                  Próximo →
-                </button>
-                <span className="text-[#0f0f0f]/20" aria-hidden="true">|</span>
-              </>
-            )}
+          <div
+            className={`flex items-center gap-3.5 transition-all duration-300 ease-out ${
+              touchRevealed
+                ? 'opacity-100 translate-y-0'
+                : 'opacity-0 translate-y-2 group-hover:opacity-100 group-hover:translate-y-0 focus-within:opacity-100 focus-within:translate-y-0'
+            }`}
+          >
+            <div className="flex items-center gap-2 rounded-full bg-white/70 backdrop-blur-md border border-white/85 px-4 py-1.5 shadow-lg">
+              {totalSlides > 1 && mode !== 'screen' && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => regressSlide()}
+                    className="px-2.5 py-1 text-[13px] font-bold uppercase tracking-wider text-[#0f0f0f] hover:text-[#dc143c] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    aria-label="Slide Anterior"
+                  >
+                    ← Anterior
+                  </button>
+                  <span className="text-[#0f0f0f]/20" aria-hidden="true">|</span>
+                  <button
+                    type="button"
+                    onClick={() => advanceSlide()}
+                    className="px-2.5 py-1 text-[13px] font-bold uppercase tracking-wider text-[#003893] hover:text-[#dc143c] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    aria-label="Próximo Slide"
+                  >
+                    Próximo →
+                  </button>
+                  <span className="text-[#0f0f0f]/20" aria-hidden="true">|</span>
+                </>
+              )}
 
-            <button
-              type="button"
-              onClick={openBroadcastModal}
-              className="px-2.5 py-1 text-[12.5px] font-bold uppercase tracking-wider text-[#08254c] hover:text-[#dc143c] transition-colors whitespace-nowrap shrink-0 cursor-pointer flex items-center gap-1.5"
-              title="Transmitir apresentação na rede ou abrir Console do Apresentador"
-            >
-              <Cast className="w-3.5 h-3.5 text-[#dc143c]" />
-              <span>{mode === 'screen' ? `Sala ${roomId}` : 'Transmitir'}</span>
-            </button>
+              {mode !== 'screen' && (
+                <>
+                  <button
+                    type="button"
+                    onClick={openSlideManager}
+                    className="px-2.5 py-1 text-[12.5px] font-bold uppercase tracking-wider text-[#003893] hover:text-[#dc143c] transition-colors whitespace-nowrap shrink-0 cursor-pointer flex items-center gap-1.5"
+                    title="Selecionar slides exibidos, reordenar, inserir/excluir e abrir Editor de Slides"
+                  >
+                    <Sliders className="w-3.5 h-3.5 text-[#003893]" />
+                    <span>Gerenciar Slides</span>
+                  </button>
+                  <span className="text-[#0f0f0f]/20" aria-hidden="true">|</span>
+                </>
+              )}
 
-            <span className="text-[#0f0f0f]/20" aria-hidden="true">|</span>
+              <button
+                type="button"
+                onClick={openBroadcastModal}
+                className="px-2.5 py-1 text-[12.5px] font-bold uppercase tracking-wider text-[#08254c] hover:text-[#dc143c] transition-colors whitespace-nowrap shrink-0 cursor-pointer flex items-center gap-1.5"
+                title="Transmitir apresentação na rede ou abrir Console do Apresentador"
+              >
+                <Cast className="w-3.5 h-3.5 text-[#dc143c]" />
+                <span>{mode === 'screen' ? `Sala ${roomId}` : 'Transmitir'}</span>
+              </button>
 
-            <button
-              type="button"
-              onClick={onToggleFullscreen}
-              className="px-2.5 py-1 text-[12.5px] font-bold uppercase tracking-wider text-[#08254c] hover:text-[#dc143c] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-              title="Alternar Tela Cheia 4K (Atalho: Tecla F)"
-            >
-              {isFullscreen ? '⤫ Sair' : '⛶ Tela Cheia'}
-            </button>
-          </div>
+              <span className="text-[#0f0f0f]/20" aria-hidden="true">|</span>
 
-          <div className="text-xl font-medium tracking-wider text-[#2f3136]/75 font-sans tabular-nums pr-1">
-            {String(currentSlide).padStart(2, '0')}{' '}
-            <span className="text-sm text-[#2f3136]/45">/ {String(totalSlides).padStart(2, '0')}</span>
+              <button
+                type="button"
+                onClick={onToggleFullscreen}
+                className="px-2.5 py-1 text-[12.5px] font-bold uppercase tracking-wider text-[#08254c] hover:text-[#dc143c] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                title="Alternar Tela Cheia 4K (Atalho: Tecla F)"
+              >
+                {isFullscreen ? '⤫ Sair' : '⛶ Tela Cheia'}
+              </button>
+            </div>
+
+            <div className="text-xl font-medium tracking-wider text-[#2f3136]/75 font-sans tabular-nums pr-1">
+              {String(currentSlide).padStart(2, '0')}{' '}
+              <span className="text-sm text-[#2f3136]/45">/ {String(totalSlides).padStart(2, '0')}</span>
+            </div>
           </div>
         </div>
       </div>
-    </div>
-  );
-});
+    );
+  }
+);
 
 /**
  * Subcomponente isolado para o Laser Pointer, Desenhos Vetoriais, Lupa e Cortina no Telão Receptor.
@@ -306,14 +335,27 @@ function AppPresentationShell() {
     slideIndex: 0,
     subStep: 0,
   });
+  const skipToRef = useRef<((slideIndex: number) => void) | null>(null);
 
   const { mode } = useBroadcast();
+  const { activeSlides } = useManagedDeck();
+
+  const deckStructuralKey = useMemo(
+    () => activeSlides.map((s) => `${s.id}:${s.steps.length}`).join('|'),
+    [activeSlides]
+  );
 
   const handleDeckPositionChange = useCallback((slideIndex: number, subStep: number) => {
     deckPosRef.current = { slideIndex, subStep };
   }, []);
 
   const getDeckPosition = useCallback(() => deckPosRef.current, []);
+
+  const handleNavigateStandaloneDeck = useCallback((targetSlideIndex: number) => {
+    if (skipToRef.current) {
+      skipToRef.current(targetSlideIndex);
+    }
+  }, []);
 
   const toggleFullscreen = useCallback(() => {
     if (typeof document === 'undefined') return;
@@ -362,6 +404,7 @@ function AppPresentationShell() {
       <>
         <PresenterConsole />
         <BroadcastModal />
+        <SlideManagerModal />
       </>
     );
   }
@@ -384,6 +427,7 @@ function AppPresentationShell() {
             <AnimatePresence mode="sync">
               <div className="nepal-deck-host">
                 <Deck
+                  key={deckStructuralKey}
                   theme={nepalSpectacleTheme}
                   transition={canvaFlowSpectacleTransition}
                   template={
@@ -391,73 +435,15 @@ function AppPresentationShell() {
                       isFullscreen={isFullscreen}
                       onToggleFullscreen={toggleFullscreen}
                       onDeckPositionChange={handleDeckPositionChange}
+                      registerSkipToRef={skipToRef}
                     />
                   }
                 >
-                  {/* SLIDE 01: CAPA (MISSÃO NEPAL & LIBERDADE RELIGIOSA) */}
-                  <Slide backgroundColor="#f4f2eb" padding={0}>
-                    <Slide01CoverContent />
-                  </Slide>
-
-                  {/* SLIDE 02: ASPECTOS GEOGRÁFICOS (ANIMAÇÃO CONTÍNUA 3D EM 4 ETAPAS) */}
-                  <Slide backgroundColor="#f4f2eb" padding={0}>
-                    <Slide02GeographyContent />
-                  </Slide>
-
-                  {/* SLIDE 03: ECONOMIA, PIB, PIB PER CAPITA & IDH (COMPARATIVO BRASIL E MUNDO) */}
-                  <Slide backgroundColor="#f4f2eb" padding={0}>
-                    <Slide02AEconomyHDIContent />
-                  </Slide>
-
-                  {/* SLIDE 04: 124 LÍNGUAS FALADAS & O SISTEMA DE CASTAS */}
-                  <Slide backgroundColor="#f4f2eb" padding={0}>
-                    <Slide02BLanguagesCastesContent />
-                  </Slide>
-
-                  {/* SLIDE 05: COSTUMES COTIDIANOS (GENTILEZA, MÃO ESQUERDA, SAPATOS, DAL BHAT & JUTHO) */}
-                  <Slide backgroundColor="#f4f2eb" padding={0}>
-                    <Slide02CDailyCustomsContent />
-                  </Slide>
-
-                  {/* SLIDE 06: MÃO INGLESA, TRÂNSITO CAÓTICO & VACAS SAGRADAS */}
-                  <Slide backgroundColor="#f4f2eb" padding={0}>
-                    <Slide02DStreetsMobilityContent />
-                  </Slide>
-
-                  {/* SLIDE 07: RITUAIS DE CREMAÇÃO PÚBLICA & GRANDES FESTIVAIS DE OUTONO (DASHAIN, TIHAR & CHHATH) */}
-                  <Slide backgroundColor="#f4f2eb" padding={0}>
-                    <Slide02ERitualsFestivalsContent />
-                  </Slide>
-
-                  {/* SLIDE 08: LINHA DO TEMPO HISTÓRICA & AVANÇO DO CRISTIANISMO (8 ETAPAS + GRÁFICO) */}
-                  <Slide backgroundColor="#f4f2eb" padding={0}>
-                    <Slide03TimelineContent />
-                  </Slide>
-
-                  {/* SLIDE 09: O CHAMADO */}
-                  <Slide backgroundColor="#f4f2eb" padding={0}>
-                    <Slide04TheCallContent />
-                  </Slide>
-
-                  {/* SLIDE 10: A VIAGEM (MAPA-MÚNDI 3D: ÔNIBUS + 5 VOOS DE IDA · +60H · 2 ÔNIBUS · 11 VOOS · 7 PAÍSES) */}
-                  <Slide backgroundColor="#f4f2eb" padding={0}>
-                    <Slide05TheJourneyContent />
-                  </Slide>
-
-                  {/* SLIDE 11: O GRUPO */}
-                  <Slide backgroundColor="#f4f2eb" padding={0}>
-                    <Slide06TheGroupContent />
-                  </Slide>
-
-                  {/* SLIDE 12: OS 2 PRIMEIROS DIAS (INTEGRAÇÃO CULTURAL & TURISMO — 5 FOTOS REAIS) */}
-                  <Slide backgroundColor="#f4f2eb" padding={0}>
-                    <Slide07CulturalIntegrationContent />
-                  </Slide>
-
-                  {/* SLIDE 13: VIAGEM PARA BARGACHHI & RECEPÇÃO NOTURNA */}
-                  <Slide backgroundColor="#f4f2eb" padding={0}>
-                    <Slide08BargachhiReceptionContent />
-                  </Slide>
+                  {activeSlides.map((slide) => (
+                    <Slide key={slide.id} backgroundColor="#f4f2eb" padding={0}>
+                      <ManagedSlideStageContent slide={slide} />
+                    </Slide>
+                  ))}
                 </Deck>
               </div>
             </AnimatePresence>
@@ -470,6 +456,9 @@ function AppPresentationShell() {
 
       {/* Modal de Transmissão P2P / Wi-Fi, Pareamento QR Code e Código de 4 Dígitos */}
       <BroadcastModal getDeckPosition={getDeckPosition} />
+
+      {/* Modal de Gerenciamento e Editor Visual 16:9 de Slides */}
+      <SlideManagerModal onNavigateToActiveSlide={handleNavigateStandaloneDeck} />
     </main>
   );
 }
